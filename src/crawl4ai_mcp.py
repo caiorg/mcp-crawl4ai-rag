@@ -23,6 +23,8 @@ import re
 import concurrent.futures
 import uuid # Added for HITL session IDs
 import json # Ensure json is imported for the return value, though it's already used below
+import os # For environment variables
+from pyvirtualdisplay import Display # For virtual display management
 
 from crawl4ai import AsyncWebCrawler, BrowserConfig, CrawlerRunConfig, CacheMode, MemoryAdaptiveDispatcher
 
@@ -288,29 +290,34 @@ async def crawl_single_page(ctx: Context, url: str, hitl_session_id: Optional[st
     Returns:
         Summary of the crawling operation and storage in Supabase
     """
-    selected_crawler = None
+    selected_crawler_obj = None # Can be a crawler instance or a dict for HITL
     using_hitl_session = False
     actual_session_id_for_cleanup = None
     supabase_client = ctx.request_context.lifespan_context.supabase_client
+    final_crawler_to_use = None
 
     try:
         if hitl_session_id:
             if hitl_session_id in hitl_sessions:
-                selected_crawler = hitl_sessions[hitl_session_id]
+                session_data = hitl_sessions[hitl_session_id]
+                if isinstance(session_data, dict) and 'crawler' in session_data:
+                    final_crawler_to_use = session_data['crawler']
+                else: # Legacy: direct crawler instance
+                    final_crawler_to_use = session_data
                 using_hitl_session = True
                 actual_session_id_for_cleanup = hitl_session_id
                 print(f"Using HITL session: {hitl_session_id} for URL: {url}")
             else:
                 return json.dumps({"success": False, "url": url, "error": "Invalid or expired HITL session ID"})
         else:
-            selected_crawler = ctx.request_context.lifespan_context.crawler
+            final_crawler_to_use = ctx.request_context.lifespan_context.crawler
             print(f"Using global crawler for URL: {url}")
 
         # Configure the crawl
         run_config = CrawlerRunConfig(cache_mode=CacheMode.BYPASS, stream=False)
         
         # Crawl the page
-        result = await selected_crawler.arun(url=url, config=run_config)
+        result = await final_crawler_to_use.arun(url=url, config=run_config)
         
         if result.success and result.markdown:
             # Extract source_id
@@ -427,10 +434,21 @@ async def crawl_single_page(ctx: Context, url: str, hitl_session_id: Optional[st
         }, indent=2)
     finally:
         if using_hitl_session and actual_session_id_for_cleanup and actual_session_id_for_cleanup in hitl_sessions:
-            hitl_crawler_instance = hitl_sessions.pop(actual_session_id_for_cleanup, None)
-            if hitl_crawler_instance:
+            session_to_cleanup = hitl_sessions.pop(actual_session_id_for_cleanup, None)
+            if session_to_cleanup:
+                crawler_instance_to_exit = None
+                display_instance_to_stop = None
+                if isinstance(session_to_cleanup, dict):
+                    crawler_instance_to_exit = session_to_cleanup.get('crawler')
+                    display_instance_to_stop = session_to_cleanup.get('display')
+                else: # Legacy: direct crawler instance
+                    crawler_instance_to_exit = session_to_cleanup
+
                 try:
-                    await hitl_crawler_instance.__aexit__(None, None, None)
+                    if crawler_instance_to_exit:
+                        await crawler_instance_to_exit.__aexit__(None, None, None)
+                    if display_instance_to_stop and hasattr(display_instance_to_stop, 'stop') and display_instance_to_stop.is_alive():
+                        display_instance_to_stop.stop()
                     print(f"HITL session {actual_session_id_for_cleanup} for {url} closed and cleaned up.")
                 except Exception as e_cleanup:
                     print(f"Error cleaning up HITL session {actual_session_id_for_cleanup} for {url}: {str(e_cleanup)}")
@@ -455,22 +473,27 @@ async def smart_crawl_url(ctx: Context, url: str, max_depth: int = 3, max_concur
     Returns:
         JSON string with crawl summary and storage information
     """
-    selected_crawler = None
+    selected_crawler_obj = None # Can be a crawler instance or a dict for HITL
     using_hitl_session = False
     actual_session_id_for_cleanup = None
     supabase_client = ctx.request_context.lifespan_context.supabase_client
+    final_crawler_to_use = None
 
     try:
         if hitl_session_id:
             if hitl_session_id in hitl_sessions:
-                selected_crawler = hitl_sessions[hitl_session_id]
+                session_data = hitl_sessions[hitl_session_id]
+                if isinstance(session_data, dict) and 'crawler' in session_data:
+                    final_crawler_to_use = session_data['crawler']
+                else: # Legacy: direct crawler instance
+                    final_crawler_to_use = session_data
                 using_hitl_session = True
                 actual_session_id_for_cleanup = hitl_session_id
                 print(f"Using HITL session: {hitl_session_id} for smart_crawl_url: {url}")
             else:
                 return json.dumps({"success": False, "url": url, "error": "Invalid or expired HITL session ID"})
         else:
-            selected_crawler = ctx.request_context.lifespan_context.crawler
+            final_crawler_to_use = ctx.request_context.lifespan_context.crawler
             print(f"Using global crawler for smart_crawl_url: {url}")
         
         # Determine the crawl strategy
@@ -479,7 +502,7 @@ async def smart_crawl_url(ctx: Context, url: str, max_depth: int = 3, max_concur
         
         if is_txt(url):
             # For text files, use simple crawl
-            crawl_results = await crawl_markdown_file(selected_crawler, url)
+            crawl_results = await crawl_markdown_file(final_crawler_to_use, url)
             crawl_type = "text_file"
         elif is_sitemap(url):
             # For sitemaps, extract URLs and crawl in parallel
@@ -490,11 +513,11 @@ async def smart_crawl_url(ctx: Context, url: str, max_depth: int = 3, max_concur
                     "url": url,
                     "error": "No URLs found in sitemap"
                 }, indent=2)
-            crawl_results = await crawl_batch(selected_crawler, sitemap_urls, max_concurrent=max_concurrent)
+            crawl_results = await crawl_batch(final_crawler_to_use, sitemap_urls, max_concurrent=max_concurrent)
             crawl_type = "sitemap"
         else:
             # For regular URLs, use recursive crawl
-            crawl_results = await crawl_recursive_internal_links(selected_crawler, [url], max_depth=max_depth, max_concurrent=max_concurrent)
+            crawl_results = await crawl_recursive_internal_links(final_crawler_to_use, [url], max_depth=max_depth, max_concurrent=max_concurrent)
             crawl_type = "webpage"
         
         if not crawl_results:
@@ -643,10 +666,21 @@ async def smart_crawl_url(ctx: Context, url: str, max_depth: int = 3, max_concur
         }, indent=2)
     finally:
         if using_hitl_session and actual_session_id_for_cleanup and actual_session_id_for_cleanup in hitl_sessions:
-            hitl_crawler_instance = hitl_sessions.pop(actual_session_id_for_cleanup, None)
-            if hitl_crawler_instance:
+            session_to_cleanup = hitl_sessions.pop(actual_session_id_for_cleanup, None)
+            if session_to_cleanup:
+                crawler_instance_to_exit = None
+                display_instance_to_stop = None
+                if isinstance(session_to_cleanup, dict):
+                    crawler_instance_to_exit = session_to_cleanup.get('crawler')
+                    display_instance_to_stop = session_to_cleanup.get('display')
+                else: # Legacy: direct crawler instance
+                    crawler_instance_to_exit = session_to_cleanup
+
                 try:
-                    await hitl_crawler_instance.__aexit__(None, None, None)
+                    if crawler_instance_to_exit:
+                        await crawler_instance_to_exit.__aexit__(None, None, None)
+                    if display_instance_to_stop and hasattr(display_instance_to_stop, 'stop') and display_instance_to_stop.is_alive():
+                        display_instance_to_stop.stop()
                     print(f"HITL session {actual_session_id_for_cleanup} for smart_crawl_url {url} closed and cleaned up.")
                 except Exception as e_cleanup:
                     print(f"Error cleaning up HITL session {actual_session_id_for_cleanup} for smart_crawl_url {url}: {str(e_cleanup)}")
@@ -1021,110 +1055,96 @@ async def initiate_human_in_the_loop(ctx: Context, url: str) -> str:
         - error (str, optional): An error message if initiation failed.
     """
     session_id = str(uuid.uuid4())
-    hitl_crawler = None  # Define hitl_crawler here to ensure it's in scope for finally
+    disp = None
+    hitl_crawler = None
+
+    vnc_port_str = os.getenv("VNC_PORT", "5901")
+    novnc_port_str = os.getenv("NOVNC_PORT", "6080")
+    app_external_hostname = os.getenv("APP_EXTERNAL_HOSTNAME", "localhost")
 
     try:
-        # Configure the browser for HITL
-        # Attempting to pass --remote-debugging-port=0
-        # Common parameter names could be browser_args, extra_options, or similar.
-        # Based on Playwright, launch_options with 'args' is a possibility.
-        # If crawl4ai wraps Playwright, browser_args might be at top level of BrowserConfig.
+        vnc_port = int(vnc_port_str)
+        novnc_port = int(novnc_port_str)
+
+        print(f"Attempting to start PyVirtualDisplay Xvnc on VNC port {vnc_port}")
+        # Note: PyVirtualDisplay uses DISPLAY env var internally.
+        # It finds a free display number for Xvnc.
+        disp = Display(
+            backend="xvnc",
+            rfbport=vnc_port, # The port Xvnc will listen on (e.g., 5901)
+            size=(1280, 1024),
+            color_depth=24,
+            # use_xauth=True, # May not be needed if Xvnc security is simple
+            # extra_args=['-SecurityTypes', 'None'] # Example: if VNC auth is an issue
+        )
+        disp.start()
+        # The actual display used, e.g. ":1", is in disp.display
+        print(f"PyVirtualDisplay Xvnc started on DISPLAY {disp.display}, rfbport {disp.rfbport}.")
+        # Ensure the DISPLAY variable is set for subprocesses if crawl4ai needs it explicitly,
+        # though pyvirtualdisplay usually handles this for the current process environment.
+        # os.environ['DISPLAY'] = disp.display
+
+        # Browser runs inside the virtual display, not headless in the traditional sense
         browser_config = BrowserConfig(
             headless=False,
-            browser_args=["--remote-debugging-port=0", "--disable-gpu", "--no-sandbox"], # Added --no-sandbox for broader compatibility
-            verbose=True  # To capture output if needed, and for debugging
+            browser_args=[
+                "--no-sandbox",
+                "--disable-gpu",
+                f"--window-size=1280,1024" # Match virtual display size
+            ],
+            verbose=True
         )
 
         hitl_crawler = AsyncWebCrawler(config=browser_config)
-        await hitl_crawler.__aenter__()
-
-        debugging_port = None
-        ws_url = None
-
-        # Attempt 1: Direct access (assuming crawl4ai exposes underlying browser's ws_endpoint)
-        if hasattr(hitl_crawler, '_browser_context') and \
-           hasattr(hitl_crawler._browser_context, '_browser') and \
-           hasattr(hitl_crawler._browser_context._browser, 'ws_endpoint'):
-            # This path is highly speculative based on Playwright's internal structure
-            # It might be hitl_crawler.browser.ws_endpoint or similar
-            ws_url = hitl_crawler._browser_context._browser.ws_endpoint
-        elif hasattr(hitl_crawler, 'browser') and hasattr(hitl_crawler.browser, 'ws_endpoint'):
-             ws_url = hitl_crawler.browser.ws_endpoint
-
-
-        if ws_url:
-            # ws_url is typically like "ws://127.0.0.1:PORT/devtools/browser/..."
-            match = re.search(r"127.0.0.1:(\d+)", ws_url)
-            if match:
-                debugging_port = int(match.group(1))
-
-        # Attempt 2: Parse browser output (if verbose=True and output is captured by crawl4ai)
-        # This part is highly dependent on how crawl4ai handles browser process output.
-        # For now, we rely on ws_endpoint. If not found, we might need to inspect
-        # hitl_crawler for methods/attributes that expose stderr/stdout of the browser process.
-        # Some libraries make this available via process objects or specific log capture features.
-        # If crawl4ai uses Playwright, Playwright itself handles the "DevTools listening on..." message
-        # and provides the ws_endpoint, so direct parsing might not be needed if ws_endpoint is accessible.
-
-        if not debugging_port:
-            # If ws_endpoint wasn't found or didn't contain the port,
-            # we need a fallback. For now, this is an error condition.
-            # Future: Could try to scan hitl_crawler.get_browser_output() if such a method exists
-            # or if verbose=True prints to a known stream that can be captured.
-            # This would involve regex search for "DevTools listening on ws://127.0.0.1:(\d+)"
-            await hitl_crawler.__aexit__(None, None, None)
-            return json.dumps({
-                "success": False,
-                "error": "Could not determine browser debugging port via ws_endpoint. Manual parsing of browser logs may be required."
-            })
-
-        debugging_url = f"http://127.0.0.1:{debugging_port}"
+        await hitl_crawler.__aenter__() # This must run after disp.start()
+        print(f"AsyncWebCrawler started within virtual display {disp.display}.")
 
         # Navigate to the initial URL using the crawler's underlying page object if possible.
-        # This is a best-effort attempt. AsyncWebCrawler might not expose 'page' directly.
-        # If crawl4ai uses Playwright, it might be accessible via `hitl_crawler.page` or `await hitl_crawler.get_new_page()`
-        # then `await page.goto(url)`.
-        # For now, we'll try a common pattern, but this might need adjustment.
         try:
-            if hasattr(hitl_crawler, 'page') and hitl_crawler.page: # Check if a page object already exists
-                 await hitl_crawler.page.goto(url, timeout=60000) # 60s timeout
-            elif hasattr(hitl_crawler, '_get_playwright_page'): # Speculative method based on Playwright
-                page = await hitl_crawler._get_playwright_page(new_page=True) # Assuming new_page creates one if none exists
+            if hasattr(hitl_crawler, 'page') and hitl_crawler.page:
+                 await hitl_crawler.page.goto(url, timeout=60000)
+            elif hasattr(hitl_crawler, '_get_playwright_page'):
+                page = await hitl_crawler._get_playwright_page(new_page=True)
                 await page.goto(url, timeout=60000)
-            else:
-                # If direct navigation isn't straightforward, the user will have to navigate manually.
-                # The primary goal is to provide the debugging_url.
-                # Consider running a minimal crawl just to navigate, though it might be overkill.
-                # For example: await hitl_crawler.arun(url=url, config=CrawlerRunConfig(max_pages_per_domain=1))
-                # However, arun also extracts content, which isn't the primary goal here.
-                # Let's try to get a page and navigate, if not, it's a soft failure for navigation.
-                pass # Navigation is best-effort
-
+            print(f"Browser navigated to {url} in Xvnc display {disp.display}.")
         except Exception as nav_exc:
-            # Non-fatal error for navigation, session is still useful
-            print(f"Note: HITL browser initiated, but failed to automatically navigate to {url}: {nav_exc}")
+            print(f"Note: HITL browser initiated, but failed to automatically navigate to {url} in Xvnc: {nav_exc}")
 
+        hitl_sessions[session_id] = {
+            'crawler': hitl_crawler,
+            'display': disp, # Store the display object for later cleanup
+            'vnc_port': vnc_port
+        }
 
-        hitl_sessions[session_id] = hitl_crawler
+        # Construct noVNC URL. Assumes entrypoint.sh's launch.sh proxies NOVNC_PORT to VNC_PORT.
+        novnc_url = f"http://{app_external_hostname}:{novnc_port}/vnc.html"
 
         return json.dumps({
             "success": True,
             "session_id": session_id,
-            "debugging_url": debugging_url,
+            "novnc_url": novnc_url, # Changed from debugging_url
             "message": (
-                "Browser initiated. Use the debugging_url to interact. "
-                "The browser console (DevTools) might show the exact page URL if direct navigation failed. "
+                f"HITL session initiated with Xvnc on display {disp.display} (VNC port {vnc_port}). "
+                f"Connect via noVNC URL: {novnc_url}. "
                 "Call resume_from_human_in_the_loop with session_id when done."
             )
         })
 
     except Exception as e:
-        if hitl_crawler: # Check if hitl_crawler was initialized
+        print(f"Error in initiate_human_in_the_loop: {str(e)}")
+        if hitl_crawler and hasattr(hitl_crawler, '_browser_context') and hitl_crawler._browser_context: # Check if crawler was more fully initialized
             try:
                 await hitl_crawler.__aexit__(None, None, None)
-            except Exception as cleanup_exc:
-                print(f"Error during HITL crawler cleanup: {cleanup_exc}")
-        return json.dumps({"success": False, "error": f"Failed to initiate HITL session: {str(e)}"})
+                print("HITL crawler exited during initiation failure cleanup.")
+            except Exception as crawler_cleanup_exc:
+                print(f"Error cleaning up HITL crawler during initiation failure: {crawler_cleanup_exc}")
+        if disp and disp.is_alive():
+            try:
+                disp.stop()
+                print("PyVirtualDisplay stopped during initiation failure cleanup.")
+            except Exception as disp_cleanup_exc:
+                print(f"Error cleaning up PyVirtualDisplay during initiation failure: {disp_cleanup_exc}")
+        return json.dumps({"success": False, "error": f"Failed to initiate HITL VNC session: {str(e)}"})
 
 @mcp.tool()
 async def resume_from_human_in_the_loop(ctx: Context, session_id: str) -> str:

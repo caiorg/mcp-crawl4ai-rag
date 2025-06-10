@@ -1,0 +1,21 @@
+#!/bin/sh
+# entrypoint.sh
+
+# Define ports - these should match arguments or be configurable
+# Docker ARG/ENV variables will be available here if set in Dockerfile or docker run
+NOVNC_PORT=${NOVNC_PORT:-6080} # Default if not set by Docker ARG/ENV
+VNC_PORT=${VNC_PORT:-5901}   # Default VNC port Xvnc will be configured to use by pyvirtualdisplay
+
+echo "Starting websockify for noVNC on port ${NOVNC_PORT}, targeting VNC port ${VNC_PORT}..."
+# Using the launch.sh script from noVNC is generally robust.
+# It will start websockify and point it to the VNC server (which pyvirtualdisplay will start on localhost:VNC_PORT).
+/opt/novnc/utils/launch.sh --listen ${NOVNC_PORT} --vnc localhost:${VNC_PORT} &
+
+# Add a small delay to ensure websockify starts before the main app, mostly for cleaner logs
+sleep 2
+
+echo "Starting MCP server (Python application)..."
+# The original CMD of the Dockerfile
+# Use exec to replace the shell process with the Python process,
+# so that signals (like SIGTERM or SIGINT) are correctly passed to the Python app.
+exec python src/crawl4ai_mcp.py

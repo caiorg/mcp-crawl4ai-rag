@@ -44,6 +44,7 @@ The Crawl4AI RAG MCP server is just the beginning. Here's where we're headed:
 - **Content Chunking**: Intelligently splits content by headers and size for better processing
 - **Vector Search**: Performs RAG over crawled content, optionally filtering by data source for precision
 - **Source Retrieval**: Retrieve sources available for filtering to guide the RAG process
+- **Human-in-the-Loop (HITL) via VNC**: Allows manual browser interaction for complex scenarios (logins, CAPTCHAs) by providing a VNC session accessible via a web browser (noVNC).
 
 ## Tools
 
@@ -59,6 +60,13 @@ The server provides essential web crawling and search tools:
 ### Conditional Tools
 
 5. **`search_code_examples`** (requires `USE_AGENTIC_RAG=true`): Search specifically for code examples and their summaries from crawled documentation. This tool provides targeted code snippet retrieval for AI coding assistants.
+
+### HITL Tools
+
+6. **`initiate_human_in_the_loop(url: str)`**: Starts a browser session within a VNC-accessible virtual display. Navigates to the provided URL. Returns a session ID and a `novnc_url` to access the browser via a web interface.
+7. **`resume_from_human_in_the_loop(session_id: str)`**: Signals that manual interaction in the specified HITL VNC session is complete and the session is ready for automated crawling.
+
+**Note on HITL Usage:** The `crawl_single_page` and `smart_crawl_url` tools now accept an optional `hitl_session_id` parameter. When this parameter is provided, these tools will use the browser session initiated and managed by the HITL tools, allowing them to operate on pages that required prior manual interaction.
 
 ## Prerequisites
 
@@ -147,6 +155,11 @@ USE_RERANKING=false
 # Supabase Configuration
 SUPABASE_URL=your_supabase_project_url
 SUPABASE_SERVICE_KEY=your_supabase_service_key
+
+# HITL VNC Configuration
+APP_EXTERNAL_HOSTNAME=your_docker_host_ip_or_hostname # IMPORTANT: Set this to the publicly accessible IP/hostname of your Docker host for noVNC to work.
+VNC_PORT=5901      # Internal port Xvnc listens on (used by noVNC proxy)
+NOVNC_PORT=6080    # External port for accessing noVNC web interface (map this port in Docker)
 ```
 
 ### RAG Strategy Options
@@ -214,8 +227,13 @@ USE_RERANKING=false
 ### Using Docker
 
 ```bash
-docker run --env-file .env -p 8051:8051 mcp/crawl4ai-rag
+docker run --env-file .env \
+           -e APP_EXTERNAL_HOSTNAME="your_docker_host_ip" \ # Replace with your Docker host's actual IP or resolvable hostname
+           -p 8051:8051 \
+           -p 6080:6080 \ # Or use ${NOVNC_PORT}:${NOVNC_PORT} if defined and your shell supports it here
+           mcp/crawl4ai-rag
 ```
+**Note:** Replace `"your_docker_host_ip"` with the actual IP address or a hostname that your browser can resolve to reach the Docker host. The port `6080` (or your configured `NOVNC_PORT`) must be accessible from your browser.
 
 ### Using Python
 
@@ -300,6 +318,71 @@ Add this server to your MCP configuration for Claude Desktop, Windsurf, or any o
   }
 }
 ```
+
+## Using Human-in-the-Loop (HITL)
+
+The HITL feature allows you to manually interact with a web page within a browser session managed by the MCP server. This is particularly useful for handling complex logins, solving CAPTCHAs, or navigating dynamic content before automated crawling takes over. The interaction occurs within a VNC session that you can access via a noVNC URL in your web browser.
+
+**Workflow:**
+
+1.  **Start the MCP Server**:
+    *   Ensure your Docker container is running.
+    *   Crucially, the `APP_EXTERNAL_HOSTNAME` environment variable must be set in your `.env` file or passed via `-e` in the `docker run` command. This should be the IP address or a resolvable hostname of the machine running Docker (e.g., your computer's IP address on your local network).
+    *   The `NOVNC_PORT` (default `6080`) must be mapped in your `docker run` command (e.g., `-p 6080:6080`) and be accessible from the machine where you'll open the noVNC URL.
+
+2.  **Initiate HITL Session**:
+    *   Call the `initiate_human_in_the_loop` tool, providing the initial `url` you want the browser to navigate to.
+    *   Example MCP client request:
+        ```json
+        {
+          "tool_name": "initiate_human_in_the_loop",
+          "arguments": {"url": "https://example.com/login"}
+        }
+        ```
+    *   The server will respond with a JSON object containing a `session_id` and a `novnc_url`.
+
+3.  **Access via noVNC**:
+    *   Open the `novnc_url` provided in the response (e.g., `http://your_docker_host_ip:6080/vnc.html`) in your local web browser.
+    *   You should see a browser window within the noVNC interface.
+
+4.  **Perform Manual Interaction**:
+    *   Inside the noVNC window, interact with the website displayed in the browser. This could involve:
+        *   Filling out login forms.
+        *   Solving CAPTCHAs.
+        *   Accepting cookie banners.
+        *   Navigating to a specific state or page.
+
+5.  **Signal Completion**:
+    *   Once you have completed all necessary manual steps, call the `resume_from_human_in_the_loop` tool with the `session_id` you received in Step 2.
+    *   Example MCP client request:
+        ```json
+        {
+          "tool_name": "resume_from_human_in_the_loop",
+          "arguments": {"session_id": "your_session_id_here"}
+        }
+        ```
+    *   This tells the MCP server that the browser session is now prepared for automated tools.
+
+6.  **Use the Session for Crawling**:
+    *   Call `crawl_single_page` or `smart_crawl_url` and include the `hitl_session_id` argument, using the same `session_id` from Step 2.
+    *   Example MCP client request:
+        ```json
+        {
+          "tool_name": "crawl_single_page",
+          "arguments": {
+            "url": "https://example.com/protected_page",
+            "hitl_session_id": "your_session_id_here"
+          }
+        }
+        ```
+    *   The crawling tool will now use the browser state that you left it in after your manual interactions.
+
+7.  **Session Cleanup**:
+    *   The HITL session (including the VNC display and the browser instance) is designed for single use with a crawling tool.
+    *   After the crawling tool that uses the `hitl_session_id` finishes its operation (whether it succeeds or fails), the session and its associated resources (VNC display, browser) will be automatically closed and cleaned up by the server.
+
+**Important Note on `APP_EXTERNAL_HOSTNAME`**:
+The `APP_EXTERNAL_HOSTNAME` environment variable *must* be set correctly for the `novnc_url` to be accessible from your browser. This should be the IP address or a resolvable hostname of the machine running the Docker container, as seen from the machine where you are opening the browser. It should generally **not** be `localhost` or `127.0.0.1` unless your browser is running on the Docker host machine itself (e.g., Docker Desktop on Windows/Mac where `localhost` might work, but for Linux hosts or remote access, the actual IP/hostname is needed).
 
 ## Building Your Own Server
 
