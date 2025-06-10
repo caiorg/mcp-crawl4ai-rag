@@ -157,7 +157,7 @@ SUPABASE_URL=your_supabase_project_url
 SUPABASE_SERVICE_KEY=your_supabase_service_key
 
 # HITL VNC Configuration
-APP_EXTERNAL_HOSTNAME=your_docker_host_ip_or_hostname # IMPORTANT: Set this to the publicly accessible IP/hostname of your Docker host for noVNC to work.
+APP_EXTERNAL_HOSTNAME=localhost # Defaults to 'localhost'. IMPORTANT: If your Docker host is remote or accessed via a specific IP/hostname (e.g., from another machine on your network or a cloud instance), you MUST set this to that IP/hostname for the noVNC URL to be accessible.
 VNC_PORT=5901      # Internal port Xvnc listens on (used by noVNC proxy)
 NOVNC_PORT=6080    # External port for accessing noVNC web interface (map this port in Docker)
 ```
@@ -228,12 +228,12 @@ USE_RERANKING=false
 
 ```bash
 docker run --env-file .env \
-           -e APP_EXTERNAL_HOSTNAME="your_docker_host_ip" \ # Replace with your Docker host's actual IP or resolvable hostname
+           -e APP_EXTERNAL_HOSTNAME="your_docker_host_ip_or_hostname" \ # Set if Docker host is not 'localhost' relative to your browser
            -p 8051:8051 \
-           -p 6080:6080 \ # Or use ${NOVNC_PORT}:${NOVNC_PORT} if defined and your shell supports it here
+           -p 6080:6080 \
            mcp/crawl4ai-rag
 ```
-**Note:** Replace `"your_docker_host_ip"` with the actual IP address or a hostname that your browser can resolve to reach the Docker host. The port `6080` (or your configured `NOVNC_PORT`) must be accessible from your browser.
+**Note:** The `-e APP_EXTERNAL_HOSTNAME="your_docker_host_ip_or_hostname"` line is crucial if your Docker host is not `localhost` relative to your browser (e.g., if it's a remote server or a VM). If accessing from the same machine where Docker is running (and `localhost` resolves correctly to the host), you might not need to set `APP_EXTERNAL_HOSTNAME` explicitly, as it defaults to `localhost`. The port `6080` (or your configured `NOVNC_PORT`) must be accessible from your browser.
 
 ### Using Python
 
@@ -327,7 +327,7 @@ The HITL feature allows you to manually interact with a web page within a browse
 
 1.  **Start the MCP Server**:
     *   Ensure your Docker container is running.
-    *   Crucially, the `APP_EXTERNAL_HOSTNAME` environment variable must be set in your `.env` file or passed via `-e` in the `docker run` command. This should be the IP address or a resolvable hostname of the machine running Docker (e.g., your computer's IP address on your local network).
+    *   The `APP_EXTERNAL_HOSTNAME` environment variable defaults to `localhost`. If you are running your browser on the same machine as the Docker host (e.g., Docker Desktop), `localhost` will typically work. However, if the Docker host is remote or you access it via a specific IP or different hostname, you **must** set `APP_EXTERNAL_HOSTNAME` to that address/hostname in your `docker run` command (e.g., `-e APP_EXTERNAL_HOSTNAME="192.168.1.10"`).
     *   The `NOVNC_PORT` (default `6080`) must be mapped in your `docker run` command (e.g., `-p 6080:6080`) and be accessible from the machine where you'll open the noVNC URL.
 
 2.  **Initiate HITL Session**:
@@ -342,7 +342,7 @@ The HITL feature allows you to manually interact with a web page within a browse
     *   The server will respond with a JSON object containing a `session_id` and a `novnc_url`.
 
 3.  **Access via noVNC**:
-    *   Open the `novnc_url` provided in the response (e.g., `http://your_docker_host_ip:6080/vnc.html`) in your local web browser.
+    *   Open the `novnc_url` provided in the response (e.g., `http://localhost:6080/vnc.html` if `APP_EXTERNAL_HOSTNAME` was not set, or `http://<your_set_hostname>:6080/vnc.html` if it was) in your local web browser.
     *   You should see a browser window within the noVNC interface.
 
 4.  **Perform Manual Interaction**:
@@ -382,7 +382,8 @@ The HITL feature allows you to manually interact with a web page within a browse
     *   After the crawling tool that uses the `hitl_session_id` finishes its operation (whether it succeeds or fails), the session and its associated resources (VNC display, browser) will be automatically closed and cleaned up by the server.
 
 **Important Note on `APP_EXTERNAL_HOSTNAME`**:
-The `APP_EXTERNAL_HOSTNAME` environment variable *must* be set correctly for the `novnc_url` to be accessible from your browser. This should be the IP address or a resolvable hostname of the machine running the Docker container, as seen from the machine where you are opening the browser. It should generally **not** be `localhost` or `127.0.0.1` unless your browser is running on the Docker host machine itself (e.g., Docker Desktop on Windows/Mac where `localhost` might work, but for Linux hosts or remote access, the actual IP/hostname is needed).
+The `APP_EXTERNAL_HOSTNAME` environment variable defaults to `localhost`. This means the `novnc_url` will be like `http://localhost:6080/vnc.html`. This default works correctly if your web browser is running on the same machine as the Docker host (e.g., typical Docker Desktop setups on Windows/Mac, or when running Docker directly on Linux and browsing from the same Linux desktop).
+If the Docker container is running on a remote machine, a virtual machine with a different IP, or any scenario where `localhost` in your browser would not point to the Docker host, you **must** set `APP_EXTERNAL_HOSTNAME` to the correct IP address or resolvable hostname of the Docker host when running the container (e.g., using `-e APP_EXTERNAL_HOSTNAME="192.168.1.10"`).
 
 ## Building Your Own Server
 
