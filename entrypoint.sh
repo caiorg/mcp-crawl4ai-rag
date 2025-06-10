@@ -6,10 +6,10 @@
 NOVNC_PORT=${NOVNC_PORT:-6080} # Default if not set by Docker ARG/ENV
 VNC_PORT=${VNC_PORT:-5901}   # Default VNC port Xvnc will be configured to use by pyvirtualdisplay
 
-echo "Starting websockify for noVNC on port ${NOVNC_PORT}, targeting VNC port ${VNC_PORT}..."
-# Using the launch.sh script from noVNC is generally robust.
+echo "Starting noVNC proxy (novnc_proxy) on port ${NOVNC_PORT}, targeting VNC server on localhost:${VNC_PORT}..."
+# Using novnc_proxy directly.
 # It will start websockify and point it to the VNC server (which pyvirtualdisplay will start on localhost:VNC_PORT).
-/opt/novnc/utils/launch.sh --listen ${NOVNC_PORT} --vnc localhost:${VNC_PORT} &
+/opt/novnc/utils/novnc_proxy --vnc localhost:${VNC_PORT} --listen ${NOVNC_PORT} &
 
 # Add a small delay to ensure websockify starts before the main app, mostly for cleaner logs
 sleep 2
