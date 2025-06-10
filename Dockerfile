@@ -1,11 +1,14 @@
 FROM python:3.12-slim
 
 ARG PORT=8051
-ARG NO_VNC_PORT=6080 # Port for noVNC web access
-ARG VNC_PORT=5901    # Internal VNC port that Xvnc will use (referenced by entrypoint.sh)
+# Port for noVNC web access
+ARG NO_VNC_PORT=6080
+# Internal VNC port that Xvnc will use (referenced by entrypoint.sh)
+ARG VNC_PORT=5901
 
 ENV NOVNC_PORT=${NO_VNC_PORT}
-ENV VNC_PORT=${VNC_PORT} # Makes it available to entrypoint.sh and potentially the app
+# Makes it available to entrypoint.sh and potentially the app
+ENV VNC_PORT=${VNC_PORT}
 
 WORKDIR /app
 
@@ -41,7 +44,8 @@ COPY entrypoint.sh /app/entrypoint.sh
 RUN chmod +x /app/entrypoint.sh
 
 EXPOSE ${PORT}
-EXPOSE ${NO_VNC_PORT} # Expose the noVNC port
+# Expose the noVNC port
+EXPOSE ${NO_VNC_PORT}
 
 # Command to run the entrypoint script
 CMD ["/app/entrypoint.sh"]
