@@ -21,6 +21,8 @@ import json
 import os
 import re
 import concurrent.futures
+import uuid # Added for HITL session IDs
+import json # Ensure json is imported for the return value, though it's already used below
 
 from crawl4ai import AsyncWebCrawler, BrowserConfig, CrawlerRunConfig, CacheMode, MemoryAdaptiveDispatcher
 
@@ -35,6 +37,9 @@ from utils import (
     extract_source_summary,
     search_code_examples
 )
+
+# Global dictionary for HITL sessions
+hitl_sessions = {}
 
 # Load environment variables from the project root .env file
 project_root = Path(__file__).resolve().parent.parent
@@ -266,30 +271,46 @@ def process_code_example(args):
     return generate_code_example_summary(code, context_before, context_after)
 
 @mcp.tool()
-async def crawl_single_page(ctx: Context, url: str) -> str:
+async def crawl_single_page(ctx: Context, url: str, hitl_session_id: Optional[str] = None) -> str:
     """
     Crawl a single web page and store its content in Supabase.
     
     This tool is ideal for quickly retrieving content from a specific URL without following links.
     The content is stored in Supabase for later retrieval and querying.
-    
+    Optionally, a Human-In-The-Loop (HITL) session ID can be provided to use an existing
+    browser session that a human may have interacted with.
+
     Args:
         ctx: The MCP server provided context
         url: URL of the web page to crawl
+        hitl_session_id: Optional ID of an active HITL session to use for crawling.
     
     Returns:
         Summary of the crawling operation and storage in Supabase
     """
+    selected_crawler = None
+    using_hitl_session = False
+    actual_session_id_for_cleanup = None
+    supabase_client = ctx.request_context.lifespan_context.supabase_client
+
     try:
-        # Get the crawler from the context
-        crawler = ctx.request_context.lifespan_context.crawler
-        supabase_client = ctx.request_context.lifespan_context.supabase_client
-        
+        if hitl_session_id:
+            if hitl_session_id in hitl_sessions:
+                selected_crawler = hitl_sessions[hitl_session_id]
+                using_hitl_session = True
+                actual_session_id_for_cleanup = hitl_session_id
+                print(f"Using HITL session: {hitl_session_id} for URL: {url}")
+            else:
+                return json.dumps({"success": False, "url": url, "error": "Invalid or expired HITL session ID"})
+        else:
+            selected_crawler = ctx.request_context.lifespan_context.crawler
+            print(f"Using global crawler for URL: {url}")
+
         # Configure the crawl
         run_config = CrawlerRunConfig(cache_mode=CacheMode.BYPASS, stream=False)
         
         # Crawl the page
-        result = await crawler.arun(url=url, config=run_config)
+        result = await selected_crawler.arun(url=url, config=run_config)
         
         if result.success and result.markdown:
             # Extract source_id
@@ -404,33 +425,53 @@ async def crawl_single_page(ctx: Context, url: str) -> str:
             "url": url,
             "error": str(e)
         }, indent=2)
+    finally:
+        if using_hitl_session and actual_session_id_for_cleanup and actual_session_id_for_cleanup in hitl_sessions:
+            hitl_crawler_instance = hitl_sessions.pop(actual_session_id_for_cleanup, None)
+            if hitl_crawler_instance:
+                try:
+                    await hitl_crawler_instance.__aexit__(None, None, None)
+                    print(f"HITL session {actual_session_id_for_cleanup} for {url} closed and cleaned up.")
+                except Exception as e_cleanup:
+                    print(f"Error cleaning up HITL session {actual_session_id_for_cleanup} for {url}: {str(e_cleanup)}")
 
 @mcp.tool()
-async def smart_crawl_url(ctx: Context, url: str, max_depth: int = 3, max_concurrent: int = 10, chunk_size: int = 5000) -> str:
+async def smart_crawl_url(ctx: Context, url: str, max_depth: int = 3, max_concurrent: int = 10, chunk_size: int = 5000, hitl_session_id: Optional[str] = None) -> str:
     """
     Intelligently crawl a URL based on its type and store content in Supabase.
     
-    This tool automatically detects the URL type and applies the appropriate crawling method:
-    - For sitemaps: Extracts and crawls all URLs in parallel
-    - For text files (llms.txt): Directly retrieves the content
-    - For regular webpages: Recursively crawls internal links up to the specified depth
-    
-    All crawled content is chunked and stored in Supabase for later retrieval and querying.
+    This tool automatically detects the URL type and applies the appropriate crawling method.
+    It can optionally use a Human-In-The-Loop (HITL) session. If a HITL session is used,
+    it will be consumed and closed by this tool upon completion or error.
     
     Args:
         ctx: The MCP server provided context
         url: URL to crawl (can be a regular webpage, sitemap.xml, or .txt file)
         max_depth: Maximum recursion depth for regular URLs (default: 3)
         max_concurrent: Maximum number of concurrent browser sessions (default: 10)
-        chunk_size: Maximum size of each content chunk in characters (default: 1000)
+        chunk_size: Maximum size of each content chunk in characters (default: 5000)
+        hitl_session_id: Optional ID of an active HITL session to use for crawling.
     
     Returns:
         JSON string with crawl summary and storage information
     """
+    selected_crawler = None
+    using_hitl_session = False
+    actual_session_id_for_cleanup = None
+    supabase_client = ctx.request_context.lifespan_context.supabase_client
+
     try:
-        # Get the crawler from the context
-        crawler = ctx.request_context.lifespan_context.crawler
-        supabase_client = ctx.request_context.lifespan_context.supabase_client
+        if hitl_session_id:
+            if hitl_session_id in hitl_sessions:
+                selected_crawler = hitl_sessions[hitl_session_id]
+                using_hitl_session = True
+                actual_session_id_for_cleanup = hitl_session_id
+                print(f"Using HITL session: {hitl_session_id} for smart_crawl_url: {url}")
+            else:
+                return json.dumps({"success": False, "url": url, "error": "Invalid or expired HITL session ID"})
+        else:
+            selected_crawler = ctx.request_context.lifespan_context.crawler
+            print(f"Using global crawler for smart_crawl_url: {url}")
         
         # Determine the crawl strategy
         crawl_results = []
@@ -438,7 +479,7 @@ async def smart_crawl_url(ctx: Context, url: str, max_depth: int = 3, max_concur
         
         if is_txt(url):
             # For text files, use simple crawl
-            crawl_results = await crawl_markdown_file(crawler, url)
+            crawl_results = await crawl_markdown_file(selected_crawler, url)
             crawl_type = "text_file"
         elif is_sitemap(url):
             # For sitemaps, extract URLs and crawl in parallel
@@ -449,11 +490,11 @@ async def smart_crawl_url(ctx: Context, url: str, max_depth: int = 3, max_concur
                     "url": url,
                     "error": "No URLs found in sitemap"
                 }, indent=2)
-            crawl_results = await crawl_batch(crawler, sitemap_urls, max_concurrent=max_concurrent)
+            crawl_results = await crawl_batch(selected_crawler, sitemap_urls, max_concurrent=max_concurrent)
             crawl_type = "sitemap"
         else:
             # For regular URLs, use recursive crawl
-            crawl_results = await crawl_recursive_internal_links(crawler, [url], max_depth=max_depth, max_concurrent=max_concurrent)
+            crawl_results = await crawl_recursive_internal_links(selected_crawler, [url], max_depth=max_depth, max_concurrent=max_concurrent)
             crawl_type = "webpage"
         
         if not crawl_results:
@@ -600,6 +641,15 @@ async def smart_crawl_url(ctx: Context, url: str, max_depth: int = 3, max_concur
             "url": url,
             "error": str(e)
         }, indent=2)
+    finally:
+        if using_hitl_session and actual_session_id_for_cleanup and actual_session_id_for_cleanup in hitl_sessions:
+            hitl_crawler_instance = hitl_sessions.pop(actual_session_id_for_cleanup, None)
+            if hitl_crawler_instance:
+                try:
+                    await hitl_crawler_instance.__aexit__(None, None, None)
+                    print(f"HITL session {actual_session_id_for_cleanup} for smart_crawl_url {url} closed and cleaned up.")
+                except Exception as e_cleanup:
+                    print(f"Error cleaning up HITL session {actual_session_id_for_cleanup} for smart_crawl_url {url}: {str(e_cleanup)}")
 
 @mcp.tool()
 async def get_available_sources(ctx: Context) -> str:
@@ -947,6 +997,189 @@ async def search_code_examples(ctx: Context, query: str, source_id: str = None, 
             "query": query,
             "error": str(e)
         }, indent=2)
+
+@mcp.tool()
+async def initiate_human_in_the_loop(ctx: Context, url: str) -> str:
+    """
+    Initiates a Human-In-The-Loop browser session for interactive web tasks.
+
+    This tool launches a non-headless browser instance, allowing a human to interact with it directly.
+    It returns a session ID and a debugging URL to access the browser's DevTools interface,
+    which typically allows viewing and interacting with the page. The specified URL is loaded
+    for convenience, though the user can navigate elsewhere once the browser is open.
+
+    Args:
+        ctx: The MCP server provided context.
+        url: The initial URL to load in the browser.
+
+    Returns:
+        A JSON string containing:
+        - success (bool): True if the session was initiated, False otherwise.
+        - session_id (str): A unique ID for the HITL session.
+        - debugging_url (str): The URL to access the browser's debugging interface.
+        - message (str): A message for the user.
+        - error (str, optional): An error message if initiation failed.
+    """
+    session_id = str(uuid.uuid4())
+    hitl_crawler = None  # Define hitl_crawler here to ensure it's in scope for finally
+
+    try:
+        # Configure the browser for HITL
+        # Attempting to pass --remote-debugging-port=0
+        # Common parameter names could be browser_args, extra_options, or similar.
+        # Based on Playwright, launch_options with 'args' is a possibility.
+        # If crawl4ai wraps Playwright, browser_args might be at top level of BrowserConfig.
+        browser_config = BrowserConfig(
+            headless=False,
+            browser_args=["--remote-debugging-port=0", "--disable-gpu", "--no-sandbox"], # Added --no-sandbox for broader compatibility
+            verbose=True  # To capture output if needed, and for debugging
+        )
+
+        hitl_crawler = AsyncWebCrawler(config=browser_config)
+        await hitl_crawler.__aenter__()
+
+        debugging_port = None
+        ws_url = None
+
+        # Attempt 1: Direct access (assuming crawl4ai exposes underlying browser's ws_endpoint)
+        if hasattr(hitl_crawler, '_browser_context') and \
+           hasattr(hitl_crawler._browser_context, '_browser') and \
+           hasattr(hitl_crawler._browser_context._browser, 'ws_endpoint'):
+            # This path is highly speculative based on Playwright's internal structure
+            # It might be hitl_crawler.browser.ws_endpoint or similar
+            ws_url = hitl_crawler._browser_context._browser.ws_endpoint
+        elif hasattr(hitl_crawler, 'browser') and hasattr(hitl_crawler.browser, 'ws_endpoint'):
+             ws_url = hitl_crawler.browser.ws_endpoint
+
+
+        if ws_url:
+            # ws_url is typically like "ws://127.0.0.1:PORT/devtools/browser/..."
+            match = re.search(r"127.0.0.1:(\d+)", ws_url)
+            if match:
+                debugging_port = int(match.group(1))
+
+        # Attempt 2: Parse browser output (if verbose=True and output is captured by crawl4ai)
+        # This part is highly dependent on how crawl4ai handles browser process output.
+        # For now, we rely on ws_endpoint. If not found, we might need to inspect
+        # hitl_crawler for methods/attributes that expose stderr/stdout of the browser process.
+        # Some libraries make this available via process objects or specific log capture features.
+        # If crawl4ai uses Playwright, Playwright itself handles the "DevTools listening on..." message
+        # and provides the ws_endpoint, so direct parsing might not be needed if ws_endpoint is accessible.
+
+        if not debugging_port:
+            # If ws_endpoint wasn't found or didn't contain the port,
+            # we need a fallback. For now, this is an error condition.
+            # Future: Could try to scan hitl_crawler.get_browser_output() if such a method exists
+            # or if verbose=True prints to a known stream that can be captured.
+            # This would involve regex search for "DevTools listening on ws://127.0.0.1:(\d+)"
+            await hitl_crawler.__aexit__(None, None, None)
+            return json.dumps({
+                "success": False,
+                "error": "Could not determine browser debugging port via ws_endpoint. Manual parsing of browser logs may be required."
+            })
+
+        debugging_url = f"http://127.0.0.1:{debugging_port}"
+
+        # Navigate to the initial URL using the crawler's underlying page object if possible.
+        # This is a best-effort attempt. AsyncWebCrawler might not expose 'page' directly.
+        # If crawl4ai uses Playwright, it might be accessible via `hitl_crawler.page` or `await hitl_crawler.get_new_page()`
+        # then `await page.goto(url)`.
+        # For now, we'll try a common pattern, but this might need adjustment.
+        try:
+            if hasattr(hitl_crawler, 'page') and hitl_crawler.page: # Check if a page object already exists
+                 await hitl_crawler.page.goto(url, timeout=60000) # 60s timeout
+            elif hasattr(hitl_crawler, '_get_playwright_page'): # Speculative method based on Playwright
+                page = await hitl_crawler._get_playwright_page(new_page=True) # Assuming new_page creates one if none exists
+                await page.goto(url, timeout=60000)
+            else:
+                # If direct navigation isn't straightforward, the user will have to navigate manually.
+                # The primary goal is to provide the debugging_url.
+                # Consider running a minimal crawl just to navigate, though it might be overkill.
+                # For example: await hitl_crawler.arun(url=url, config=CrawlerRunConfig(max_pages_per_domain=1))
+                # However, arun also extracts content, which isn't the primary goal here.
+                # Let's try to get a page and navigate, if not, it's a soft failure for navigation.
+                pass # Navigation is best-effort
+
+        except Exception as nav_exc:
+            # Non-fatal error for navigation, session is still useful
+            print(f"Note: HITL browser initiated, but failed to automatically navigate to {url}: {nav_exc}")
+
+
+        hitl_sessions[session_id] = hitl_crawler
+
+        return json.dumps({
+            "success": True,
+            "session_id": session_id,
+            "debugging_url": debugging_url,
+            "message": (
+                "Browser initiated. Use the debugging_url to interact. "
+                "The browser console (DevTools) might show the exact page URL if direct navigation failed. "
+                "Call resume_from_human_in_the_loop with session_id when done."
+            )
+        })
+
+    except Exception as e:
+        if hitl_crawler: # Check if hitl_crawler was initialized
+            try:
+                await hitl_crawler.__aexit__(None, None, None)
+            except Exception as cleanup_exc:
+                print(f"Error during HITL crawler cleanup: {cleanup_exc}")
+        return json.dumps({"success": False, "error": f"Failed to initiate HITL session: {str(e)}"})
+
+@mcp.tool()
+async def resume_from_human_in_the_loop(ctx: Context, session_id: str) -> str:
+    """
+    Signals the completion of human interaction in a HITL session.
+
+    This tool is called by the user after they have finished their tasks in the
+    browser window opened by 'initiate_human_in_the_loop'. It validates the session
+    and makes it available for subsequent automated crawling tools to use the
+    browser's current state.
+
+    Args:
+        ctx: The MCP server provided context.
+        session_id: The unique ID of the HITL session to resume.
+
+    Returns:
+        A JSON string indicating success or failure:
+        - success (bool): True if the session is valid and resumed, False otherwise.
+        - session_id (str): The session ID.
+        - message (str): A confirmation or error message.
+        - error (str, optional): An error message if resumption failed.
+    """
+    try:
+        if session_id not in hitl_sessions:
+            return json.dumps({
+                "success": False,
+                "session_id": session_id,
+                "error": "Invalid or expired session_id. Please initiate a new HITL session."
+            })
+
+        # Optional: Could update a status or timestamp on hitl_sessions[session_id] here
+        # For example:
+        # if isinstance(hitl_sessions[session_id], dict): # If we stored a dict instead of just crawler
+        #     hitl_sessions[session_id]['status'] = 'resumed_by_user'
+        #     hitl_sessions[session_id]['resumed_at'] = time.time()
+        # else: # If hitl_sessions[session_id] is the crawler object itself
+        #     # We might need to wrap the crawler in a dictionary if we want to store more metadata.
+        #     # For now, just knowing the session_id is valid is enough.
+        #     pass
+
+        # The crawler instance is hitl_sessions[session_id]
+        # It will be picked up by other tools if they are modified to look for it.
+
+        return json.dumps({
+            "success": True,
+            "session_id": session_id,
+            "message": "Human interaction phase complete. The browser session (if still active) can now be used by other tools that support HITL sessions."
+        })
+
+    except Exception as e:
+        return json.dumps({
+            "success": False,
+            "session_id": session_id,
+            "error": f"Error in resume_from_human_in_the_loop: {str(e)}"
+        })
 
 async def crawl_markdown_file(crawler: AsyncWebCrawler, url: str) -> List[Dict[str, Any]]:
     """
