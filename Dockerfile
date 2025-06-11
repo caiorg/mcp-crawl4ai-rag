@@ -21,6 +21,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     websockify \
     git \
     net-tools \
+    procps \
     && rm -rf /var/lib/apt/lists/*
 
 # Clone noVNC
