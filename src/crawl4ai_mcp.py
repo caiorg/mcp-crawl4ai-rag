@@ -21,6 +21,7 @@ import json
 import os
 import re
 import concurrent.futures
+import subprocess # Added for starting fluxbox
 import uuid # Added for HITL session IDs
 # json is already imported earlier by `import json`
 # os is already imported earlier by `import os`
@@ -438,17 +439,31 @@ async def crawl_single_page(ctx: Context, url: str, hitl_session_id: Optional[st
             if session_to_cleanup:
                 crawler_instance_to_exit = None
                 display_instance_to_stop = None
+                fluxbox_process_to_terminate = None
                 if isinstance(session_to_cleanup, dict):
                     crawler_instance_to_exit = session_to_cleanup.get('crawler')
                     display_instance_to_stop = session_to_cleanup.get('display')
+                    fluxbox_process_to_terminate = session_to_cleanup.get('fluxbox_process')
                 else: # Legacy: direct crawler instance
                     crawler_instance_to_exit = session_to_cleanup
 
                 try:
                     if crawler_instance_to_exit:
                         await crawler_instance_to_exit.__aexit__(None, None, None)
+
+                    # Stop Fluxbox before stopping the display server
+                    if fluxbox_process_to_terminate and fluxbox_process_to_terminate.poll() is None:
+                        fluxbox_process_to_terminate.terminate()
+                        try:
+                            fluxbox_process_to_terminate.wait(timeout=2) # Wait a bit for termination
+                        except subprocess.TimeoutExpired:
+                            fluxbox_process_to_terminate.kill() # Force kill if terminate doesn't work quickly
+                            print(f"HITL session {actual_session_id_for_cleanup}: fluxbox process killed after timeout.")
+                        print(f"HITL session {actual_session_id_for_cleanup}: fluxbox process terminated.")
+
                     if display_instance_to_stop and hasattr(display_instance_to_stop, 'stop') and display_instance_to_stop.is_alive():
                         display_instance_to_stop.stop()
+
                     print(f"HITL session {actual_session_id_for_cleanup} for {url} closed and cleaned up.")
                 except Exception as e_cleanup:
                     print(f"Error cleaning up HITL session {actual_session_id_for_cleanup} for {url}: {str(e_cleanup)}")
@@ -670,15 +685,27 @@ async def smart_crawl_url(ctx: Context, url: str, max_depth: int = 3, max_concur
             if session_to_cleanup:
                 crawler_instance_to_exit = None
                 display_instance_to_stop = None
+                fluxbox_process_to_terminate = None
                 if isinstance(session_to_cleanup, dict):
                     crawler_instance_to_exit = session_to_cleanup.get('crawler')
                     display_instance_to_stop = session_to_cleanup.get('display')
+                    fluxbox_process_to_terminate = session_to_cleanup.get('fluxbox_process')
                 else: # Legacy: direct crawler instance
                     crawler_instance_to_exit = session_to_cleanup
 
                 try:
                     if crawler_instance_to_exit:
                         await crawler_instance_to_exit.__aexit__(None, None, None)
+
+                    if fluxbox_process_to_terminate and fluxbox_process_to_terminate.poll() is None:
+                        fluxbox_process_to_terminate.terminate()
+                        try:
+                            fluxbox_process_to_terminate.wait(timeout=2)
+                        except subprocess.TimeoutExpired:
+                            fluxbox_process_to_terminate.kill()
+                            print(f"HITL session {actual_session_id_for_cleanup}: fluxbox process killed after timeout for smart_crawl_url.")
+                        print(f"HITL session {actual_session_id_for_cleanup}: fluxbox process terminated for smart_crawl_url.")
+
                     if display_instance_to_stop and hasattr(display_instance_to_stop, 'stop') and display_instance_to_stop.is_alive():
                         display_instance_to_stop.stop()
                     print(f"HITL session {actual_session_id_for_cleanup} for smart_crawl_url {url} closed and cleaned up.")
@@ -1057,6 +1084,7 @@ async def initiate_human_in_the_loop(ctx: Context, url: str) -> str:
     session_id = str(uuid.uuid4())
     disp = None
     hitl_crawler = None
+    fluxbox_process = None
 
     vnc_port_str = os.getenv("VNC_PORT", "5901")
     novnc_port_str = os.getenv("NOVNC_PORT", "6080")
@@ -1080,9 +1108,28 @@ async def initiate_human_in_the_loop(ctx: Context, url: str) -> str:
         disp.start()
         # The actual display used, e.g. ":1", is in disp.display
         print(f"PyVirtualDisplay Xvnc started on DISPLAY {disp.display}, using configured rfbport {vnc_port}.")
-        # Ensure the DISPLAY variable is set for subprocesses if crawl4ai needs it explicitly,
-        # though pyvirtualdisplay usually handles this for the current process environment.
-        # os.environ['DISPLAY'] = disp.display
+
+        # Start fluxbox window manager in the background on this display
+        try:
+            fluxbox_env = disp.env() # Use environment prepared by PyVirtualDisplay
+            print(f"Attempting to start fluxbox on display {disp.display}...")
+            # Start fluxbox, redirecting its output to /dev/null to keep logs clean
+            fluxbox_process = subprocess.Popen(
+                ["fluxbox"],
+                env=fluxbox_env,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL
+            )
+            await asyncio.sleep(0.5) # Small delay to let fluxbox initialize
+
+            if fluxbox_process.poll() is not None:
+                print(f"WARNING: fluxbox may have failed to start. Exit code: {fluxbox_process.returncode}. The VNC session might be a black screen or unusable.")
+                # fluxbox_process = None # Ensure it's not stored if failed
+            else:
+                print("Fluxbox process started (or starting) in the background.")
+        except Exception as fb_exc:
+            print(f"WARNING: Failed to start fluxbox: {fb_exc}. Proceeding without window manager. VNC session might be black or unusable.")
+            fluxbox_process = None # Ensure it's not stored if failed
 
         # Browser runs inside the virtual display, not headless in the traditional sense
         browser_config = BrowserConfig(
@@ -1112,11 +1159,12 @@ async def initiate_human_in_the_loop(ctx: Context, url: str) -> str:
 
         hitl_sessions[session_id] = {
             'crawler': hitl_crawler,
-            'display': disp, # Store the display object for later cleanup
-            'vnc_port': vnc_port
+            'display': disp,
+            'vnc_port': vnc_port,
+            'fluxbox_process': fluxbox_process # Store fluxbox process
         }
 
-        # Construct noVNC URL. Assumes entrypoint.sh's launch.sh proxies NOVNC_PORT to VNC_PORT.
+        # Construct noVNC URL. Assumes entrypoint.sh's novnc_proxy proxies NOVNC_PORT to VNC_PORT.
         novnc_url = f"http://{app_external_hostname}:{novnc_port}/vnc.html"
 
         return json.dumps({
@@ -1132,12 +1180,24 @@ async def initiate_human_in_the_loop(ctx: Context, url: str) -> str:
 
     except Exception as e:
         print(f"Error in initiate_human_in_the_loop: {str(e)}")
-        if hitl_crawler and hasattr(hitl_crawler, '_browser_context') and hitl_crawler._browser_context: # Check if crawler was more fully initialized
+        if hitl_crawler and hasattr(hitl_crawler, '_browser_context') and hitl_crawler._browser_context:
             try:
                 await hitl_crawler.__aexit__(None, None, None)
                 print("HITL crawler exited during initiation failure cleanup.")
             except Exception as crawler_cleanup_exc:
                 print(f"Error cleaning up HITL crawler during initiation failure: {crawler_cleanup_exc}")
+
+        if fluxbox_process and fluxbox_process.poll() is None:
+            try:
+                fluxbox_process.terminate()
+                fluxbox_process.wait(timeout=1) # Short wait
+                print("Fluxbox process terminated during initiation failure cleanup.")
+            except subprocess.TimeoutExpired:
+                fluxbox_process.kill()
+                print("Fluxbox process killed during initiation failure cleanup.")
+            except Exception as fb_cleanup_exc:
+                 print(f"Error cleaning up fluxbox process during initiation failure: {fb_cleanup_exc}")
+
         if disp and disp.is_alive():
             try:
                 disp.stop()
