@@ -9,6 +9,7 @@ ARG VNC_PORT=5901
 ENV NOVNC_PORT=${NO_VNC_PORT}
 # Makes it available to entrypoint.sh and potentially the app
 ENV VNC_PORT=${VNC_PORT}
+ENV DEBUG="pw:api,pw:browser*" # Enable Playwright debug logging
 
 WORKDIR /app
 
