@@ -1079,7 +1079,7 @@ async def initiate_human_in_the_loop(ctx: Context, url: str) -> str:
         )
         disp.start()
         # The actual display used, e.g. ":1", is in disp.display
-        print(f"PyVirtualDisplay Xvnc started on DISPLAY {disp.display}, rfbport {disp.rfbport}.")
+        print(f"PyVirtualDisplay Xvnc started on DISPLAY {disp.display}, using configured rfbport {vnc_port}.")
         # Ensure the DISPLAY variable is set for subprocesses if crawl4ai needs it explicitly,
         # though pyvirtualdisplay usually handles this for the current process environment.
         # os.environ['DISPLAY'] = disp.display
