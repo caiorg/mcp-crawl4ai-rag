@@ -22,8 +22,8 @@ import os
 import re
 import concurrent.futures
 import uuid # Added for HITL session IDs
-import json # Ensure json is imported for the return value, though it's already used below
-import os # For environment variables
+# json is already imported earlier by `import json`
+# os is already imported earlier by `import os`
 from pyvirtualdisplay import Display # For virtual display management
 
 from crawl4ai import AsyncWebCrawler, BrowserConfig, CrawlerRunConfig, CacheMode, MemoryAdaptiveDispatcher
@@ -88,7 +88,7 @@ async def crawl4ai_lifespan(server: FastMCP) -> AsyncIterator[Crawl4AIContext]:
         try:
             reranking_model = CrossEncoder("cross-encoder/ms-marco-MiniLM-L-6-v2")
         except Exception as e:
-            print(f"Failed to load reranking model: {e}")
+            print(f"Failed to load reranking model: {e}") # Original print
             reranking_model = None
     
     try:
