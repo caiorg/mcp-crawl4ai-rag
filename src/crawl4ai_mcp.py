@@ -1087,7 +1087,7 @@ async def initiate_human_in_the_loop(ctx: Context, url: str) -> str:
         # Browser runs inside the virtual display, not headless in the traditional sense
         browser_config = BrowserConfig(
             headless=False,
-            browser_args=[
+            extra_args=[  # Changed from browser_args to extra_args
                 "--no-sandbox",
                 "--disable-gpu",
                 f"--window-size=1280,1024" # Match virtual display size
