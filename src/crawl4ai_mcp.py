@@ -72,7 +72,7 @@ async def crawl4ai_lifespan(server: FastMCP) -> AsyncIterator[Crawl4AIContext]:
     """
     # Create browser configuration
     browser_config = BrowserConfig(
-        headless=False, # Changed to False for this diagnostic test
+        headless=True, # Reverted to True
         verbose=False
     )
     
