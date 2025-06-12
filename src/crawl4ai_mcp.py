@@ -318,6 +318,17 @@ async def crawl_single_page(ctx: Context, url: str, hitl_session_id: Optional[st
         run_config = CrawlerRunConfig(cache_mode=CacheMode.BYPASS, stream=False)
         
         # Crawl the page
+        # For xeyes test, final_crawler_to_use might be None if using HITL session
+        if not final_crawler_to_use and using_hitl_session:
+            # This is the xeyes diagnostic case, simulate a successful "crawl"
+            # or handle appropriately if this tool should error out.
+            # For now, let's assume it's a diagnostic pass-through.
+            return json.dumps({
+                "success": True,
+                "url": url,
+                "message": "Diagnostic HITL session (xeyes) noted. No actual crawling performed by this tool."
+            })
+
         result = await final_crawler_to_use.arun(url=url, config=run_config)
         
         if result.success and result.markdown:
@@ -329,14 +340,14 @@ async def crawl_single_page(ctx: Context, url: str, hitl_session_id: Optional[st
             chunks = smart_chunk_markdown(result.markdown)
             
             # Prepare data for Supabase
-            urls = []
+            urls_list = [] # Renamed to avoid conflict with function arg
             chunk_numbers = []
             contents = []
             metadatas = []
             total_word_count = 0
             
             for i, chunk in enumerate(chunks):
-                urls.append(url)
+                urls_list.append(url)
                 chunk_numbers.append(i)
                 contents.append(chunk)
                 
@@ -359,18 +370,18 @@ async def crawl_single_page(ctx: Context, url: str, hitl_session_id: Optional[st
             update_source_info(supabase_client, source_id, source_summary, total_word_count)
             
             # Add documentation chunks to Supabase (AFTER source exists)
-            add_documents_to_supabase(supabase_client, urls, chunk_numbers, contents, metadatas, url_to_full_document)
+            add_documents_to_supabase(supabase_client, urls_list, chunk_numbers, contents, metadatas, url_to_full_document)
             
             # Extract and process code examples only if enabled
             extract_code_examples = os.getenv("USE_AGENTIC_RAG", "false") == "true"
             if extract_code_examples:
                 code_blocks = extract_code_blocks(result.markdown)
                 if code_blocks:
-                    code_urls = []
+                    code_urls_list = [] # Renamed
                     code_chunk_numbers = []
-                    code_examples = []
+                    code_examples_list = [] # Renamed
                     code_summaries = []
-                    code_metadatas = []
+                    code_metadatas_list = [] # Renamed
                     
                     # Process code examples in parallel
                     with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
@@ -383,9 +394,9 @@ async def crawl_single_page(ctx: Context, url: str, hitl_session_id: Optional[st
                     
                     # Prepare code example data
                     for i, (block, summary) in enumerate(zip(code_blocks, summaries)):
-                        code_urls.append(url)
+                        code_urls_list.append(url)
                         code_chunk_numbers.append(i)
-                        code_examples.append(block['code'])
+                        code_examples_list.append(block['code'])
                         code_summaries.append(summary)
                         
                         # Create metadata for code example
@@ -396,16 +407,16 @@ async def crawl_single_page(ctx: Context, url: str, hitl_session_id: Optional[st
                             "char_count": len(block['code']),
                             "word_count": len(block['code'].split())
                         }
-                        code_metadatas.append(code_meta)
+                        code_metadatas_list.append(code_meta)
                     
                     # Add code examples to Supabase
                     add_code_examples_to_supabase(
                         supabase_client, 
-                        code_urls, 
+                        code_urls_list,
                         code_chunk_numbers, 
-                        code_examples, 
+                        code_examples_list,
                         code_summaries, 
-                        code_metadatas
+                        code_metadatas_list
                     )
             
             return json.dumps({
@@ -425,7 +436,7 @@ async def crawl_single_page(ctx: Context, url: str, hitl_session_id: Optional[st
             return json.dumps({
                 "success": False,
                 "url": url,
-                "error": result.error_message
+                "error": result.error_message if result else "Crawler did not run or failed."
             }, indent=2)
     except Exception as e:
         return json.dumps({
@@ -440,24 +451,34 @@ async def crawl_single_page(ctx: Context, url: str, hitl_session_id: Optional[st
                 crawler_instance_to_exit = None
                 display_instance_to_stop = None
                 fluxbox_process_to_terminate = None
+                x_app_process_to_terminate = None # Added for xeyes
                 if isinstance(session_to_cleanup, dict):
-                    crawler_instance_to_exit = session_to_cleanup.get('crawler')
+                    crawler_instance_to_exit = session_to_cleanup.get('crawler') # Will be None for xeyes test
                     display_instance_to_stop = session_to_cleanup.get('display')
                     fluxbox_process_to_terminate = session_to_cleanup.get('fluxbox_process')
+                    x_app_process_to_terminate = session_to_cleanup.get('x_app_process') # Get x_app_process
                 else: # Legacy: direct crawler instance
+                    # This path should ideally not be taken if initiate_human_in_the_loop always stores a dict
                     crawler_instance_to_exit = session_to_cleanup
 
                 try:
-                    if crawler_instance_to_exit:
+                    if crawler_instance_to_exit: # Check if crawler exists
                         await crawler_instance_to_exit.__aexit__(None, None, None)
 
-                    # Stop Fluxbox before stopping the display server
+                    if x_app_process_to_terminate and x_app_process_to_terminate.poll() is None: # Terminate x_app
+                        x_app_process_to_terminate.terminate()
+                        try:
+                            x_app_process_to_terminate.wait(timeout=1)
+                        except subprocess.TimeoutExpired:
+                            x_app_process_to_terminate.kill()
+                        print(f"HITL session {actual_session_id_for_cleanup}: x_app_process terminated.")
+
                     if fluxbox_process_to_terminate and fluxbox_process_to_terminate.poll() is None:
                         fluxbox_process_to_terminate.terminate()
                         try:
-                            fluxbox_process_to_terminate.wait(timeout=2) # Wait a bit for termination
+                            fluxbox_process_to_terminate.wait(timeout=2)
                         except subprocess.TimeoutExpired:
-                            fluxbox_process_to_terminate.kill() # Force kill if terminate doesn't work quickly
+                            fluxbox_process_to_terminate.kill()
                             print(f"HITL session {actual_session_id_for_cleanup}: fluxbox process killed after timeout.")
                         print(f"HITL session {actual_session_id_for_cleanup}: fluxbox process terminated.")
 
@@ -511,6 +532,15 @@ async def smart_crawl_url(ctx: Context, url: str, max_depth: int = 3, max_concur
             final_crawler_to_use = ctx.request_context.lifespan_context.crawler
             print(f"Using global crawler for smart_crawl_url: {url}")
         
+        # For xeyes test, final_crawler_to_use might be None if using HITL session
+        if not final_crawler_to_use and using_hitl_session:
+            # This is the xeyes diagnostic case.
+            return json.dumps({
+                "success": True,
+                "url": url,
+                "message": "Diagnostic HITL session (xeyes) noted. No actual crawling performed by smart_crawl_url."
+            })
+
         # Determine the crawl strategy
         crawl_results = []
         crawl_type = None
@@ -543,7 +573,7 @@ async def smart_crawl_url(ctx: Context, url: str, max_depth: int = 3, max_concur
             }, indent=2)
         
         # Process results and store in Supabase
-        urls = []
+        urls_list = [] # Renamed
         chunk_numbers = []
         contents = []
         metadatas = []
@@ -569,7 +599,7 @@ async def smart_crawl_url(ctx: Context, url: str, max_depth: int = 3, max_concur
                 source_word_counts[source_id] = 0
             
             for i, chunk in enumerate(chunks):
-                urls.append(source_url)
+                urls_list.append(source_url)
                 chunk_numbers.append(i)
                 contents.append(chunk)
                 
@@ -603,17 +633,17 @@ async def smart_crawl_url(ctx: Context, url: str, max_depth: int = 3, max_concur
         
         # Add documentation chunks to Supabase (AFTER sources exist)
         batch_size = 20
-        add_documents_to_supabase(supabase_client, urls, chunk_numbers, contents, metadatas, url_to_full_document, batch_size=batch_size)
+        add_documents_to_supabase(supabase_client, urls_list, chunk_numbers, contents, metadatas, url_to_full_document, batch_size=batch_size)
         
         # Extract and process code examples from all documents only if enabled
         extract_code_examples_enabled = os.getenv("USE_AGENTIC_RAG", "false") == "true"
         if extract_code_examples_enabled:
             all_code_blocks = []
-            code_urls = []
+            code_urls_list = [] # Renamed
             code_chunk_numbers = []
-            code_examples = []
+            code_examples_list = [] # Renamed
             code_summaries = []
-            code_metadatas = []
+            code_metadatas_list = [] # Renamed
             
             # Extract code blocks from all documents
             for doc in crawl_results:
@@ -636,30 +666,30 @@ async def smart_crawl_url(ctx: Context, url: str, max_depth: int = 3, max_concur
                     source_id = parsed_url.netloc or parsed_url.path
                     
                     for i, (block, summary) in enumerate(zip(code_blocks, summaries)):
-                        code_urls.append(source_url)
-                        code_chunk_numbers.append(len(code_examples))  # Use global code example index
-                        code_examples.append(block['code'])
+                        code_urls_list.append(source_url)
+                        code_chunk_numbers.append(len(code_examples_list))  # Use global code example index
+                        code_examples_list.append(block['code'])
                         code_summaries.append(summary)
                         
                         # Create metadata for code example
                         code_meta = {
-                            "chunk_index": len(code_examples) - 1,
+                            "chunk_index": len(code_examples_list) - 1,
                             "url": source_url,
                             "source": source_id,
                             "char_count": len(block['code']),
                             "word_count": len(block['code'].split())
                         }
-                        code_metadatas.append(code_meta)
+                        code_metadatas_list.append(code_meta)
             
             # Add all code examples to Supabase
-            if code_examples:
+            if code_examples_list: # Check if list is not empty
                 add_code_examples_to_supabase(
                     supabase_client, 
-                    code_urls, 
+                    code_urls_list,
                     code_chunk_numbers, 
-                    code_examples, 
+                    code_examples_list,
                     code_summaries, 
-                    code_metadatas,
+                    code_metadatas_list,
                     batch_size=batch_size
                 )
         
@@ -669,7 +699,7 @@ async def smart_crawl_url(ctx: Context, url: str, max_depth: int = 3, max_concur
             "crawl_type": crawl_type,
             "pages_crawled": len(crawl_results),
             "chunks_stored": chunk_count,
-            "code_examples_stored": len(code_examples),
+            "code_examples_stored": len(code_examples_list) if 'code_examples_list' in locals() else 0,
             "sources_updated": len(source_content_map),
             "urls_crawled": [doc['url'] for doc in crawl_results][:5] + (["..."] if len(crawl_results) > 5 else [])
         }, indent=2)
@@ -686,16 +716,26 @@ async def smart_crawl_url(ctx: Context, url: str, max_depth: int = 3, max_concur
                 crawler_instance_to_exit = None
                 display_instance_to_stop = None
                 fluxbox_process_to_terminate = None
+                x_app_process_to_terminate = None # Added for xeyes
                 if isinstance(session_to_cleanup, dict):
-                    crawler_instance_to_exit = session_to_cleanup.get('crawler')
+                    crawler_instance_to_exit = session_to_cleanup.get('crawler') # Will be None for xeyes test
                     display_instance_to_stop = session_to_cleanup.get('display')
                     fluxbox_process_to_terminate = session_to_cleanup.get('fluxbox_process')
-                else: # Legacy: direct crawler instance
+                    x_app_process_to_terminate = session_to_cleanup.get('x_app_process') # Get x_app_process
+                else: # Legacy
                     crawler_instance_to_exit = session_to_cleanup
 
                 try:
-                    if crawler_instance_to_exit:
+                    if crawler_instance_to_exit: # Check if crawler exists
                         await crawler_instance_to_exit.__aexit__(None, None, None)
+
+                    if x_app_process_to_terminate and x_app_process_to_terminate.poll() is None: # Terminate x_app
+                        x_app_process_to_terminate.terminate()
+                        try:
+                            x_app_process_to_terminate.wait(timeout=1)
+                        except subprocess.TimeoutExpired:
+                            x_app_process_to_terminate.kill()
+                        print(f"HITL session {actual_session_id_for_cleanup}: x_app_process terminated for smart_crawl_url.")
 
                     if fluxbox_process_to_terminate and fluxbox_process_to_terminate.poll() is None:
                         fluxbox_process_to_terminate.terminate()
@@ -1083,8 +1123,9 @@ async def initiate_human_in_the_loop(ctx: Context, url: str) -> str:
     """
     session_id = str(uuid.uuid4())
     disp = None
-    hitl_crawler = None
+    # hitl_crawler = None # Will remain None for this diagnostic test
     fluxbox_process = None
+    x_app_process = None # For xeyes
 
     vnc_port_str = os.getenv("VNC_PORT", "5901")
     novnc_port_str = os.getenv("NOVNC_PORT", "6080")
@@ -1131,66 +1172,97 @@ async def initiate_human_in_the_loop(ctx: Context, url: str) -> str:
             print(f"WARNING: Failed to start fluxbox: {fb_exc}. Proceeding without window manager. VNC session might be black or unusable.")
             fluxbox_process = None # Ensure it's not stored if failed
 
-        # Browser runs inside the virtual display, not headless in the traditional sense
-        browser_config = BrowserConfig(
-            browser_type="firefox",  # Added to specify Firefox
-            headless=False,
-            extra_args=[],       # Changed to an empty list
-            verbose=True
-            # viewport_width and viewport_height can be used if window size needs specific setting
-            # viewport_width=1280,
-            # viewport_height=1024
-        )
-
-        hitl_crawler = AsyncWebCrawler(config=browser_config)
-        await hitl_crawler.__aenter__() # This must run after disp.start()
-        print(f"AsyncWebCrawler started within virtual display {disp.display}.")
-
-        # Navigate to the initial URL using the crawler's underlying page object if possible.
+        # Launch xeyes instead of the browser for diagnostics
         try:
-            if hasattr(hitl_crawler, 'page') and hitl_crawler.page:
-                 await hitl_crawler.page.goto(url, timeout=60000)
-            elif hasattr(hitl_crawler, '_get_playwright_page'):
-                page = await hitl_crawler._get_playwright_page(new_page=True)
-                await page.goto(url, timeout=60000)
-            print(f"Browser navigated to {url} in Xvnc display {disp.display}.")
-        except Exception as nav_exc:
-            print(f"Note: HITL browser initiated, but failed to automatically navigate to {url} in Xvnc: {nav_exc}")
+            print(f"Attempting to start xeyes on display {disp.display}...")
+            x_app_process = subprocess.Popen(
+                ["xeyes"],
+                env=disp.env(),
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL
+            )
+            await asyncio.sleep(0.2) # Brief moment for xeyes to appear
+            if x_app_process.poll() is not None:
+                print(f"WARNING: xeyes may have failed to start. Exit code: {x_app_process.returncode}")
+                x_app_process = None
+            else:
+                print("xeyes process started (or starting) in the background.")
+        except FileNotFoundError:
+            print(f"CRITICAL_ERROR: xeyes command not found. Ensure x11-apps is installed in Dockerfile.")
+            x_app_process = None
+        except Exception as xe_exc:
+            print(f"WARNING: Failed to start xeyes: {xe_exc}")
+            x_app_process = None
+
+        # Comment out browser launch logic
+        # # Browser runs inside the virtual display, not headless in the traditional sense
+        # browser_config = BrowserConfig(
+        #     browser_type="firefox",
+        #     headless=False,
+        #     extra_args=["--disable-3d-apis"],
+        #     verbose=True
+        # )
+        #
+        # hitl_crawler = AsyncWebCrawler(config=browser_config)
+        # await hitl_crawler.__aenter__()
+        # print(f"AsyncWebCrawler started within virtual display {disp.display}.")
+
+        # # Navigate to the initial URL using the crawler's underlying page object if possible.
+        # try:
+        #     if hasattr(hitl_crawler, 'page') and hitl_crawler.page:
+        #          await hitl_crawler.page.goto(url, timeout=60000)
+        #     elif hasattr(hitl_crawler, '_get_playwright_page'):
+        #         page = await hitl_crawler._get_playwright_page(new_page=True)
+        #         await page.goto(url, timeout=60000)
+        #     print(f"Browser navigated to {url} in Xvnc display {disp.display}.")
+        # except Exception as nav_exc:
+        #     print(f"Note: HITL browser initiated, but failed to automatically navigate to {url} in Xvnc: {nav_exc}")
 
         hitl_sessions[session_id] = {
-            'crawler': hitl_crawler,
+            'crawler': None, # Browser crawler is commented out for this test
             'display': disp,
             'vnc_port': vnc_port,
-            'fluxbox_process': fluxbox_process # Store fluxbox process
+            'fluxbox_process': fluxbox_process,
+            'x_app_process': x_app_process # Store xeyes process (or None if it failed)
         }
 
-        # Construct noVNC URL. Assumes entrypoint.sh's novnc_proxy proxies NOVNC_PORT to VNC_PORT.
         novnc_url = f"http://{app_external_hostname}:{novnc_port}/vnc.html"
 
         return json.dumps({
             "success": True,
             "session_id": session_id,
-            "novnc_url": novnc_url, # Changed from debugging_url
+            "novnc_url": novnc_url,
             "message": (
-                f"HITL session initiated with Xvnc on display {disp.display} (VNC port {vnc_port}). "
-                f"Connect via noVNC URL: {novnc_url}. "
-                "Call resume_from_human_in_the_loop with session_id when done."
+                f"HITL diagnostic session initiated with Xvnc on display {disp.display} (VNC port {vnc_port}). "
+                f"Fluxbox and xeyes have been started. You should see 'xeyes' (two eyes following your mouse) in the VNC session via noVNC URL: {novnc_url}. "
+                "Browser functionality is disabled for this test. Call resume_from_human_in_the_loop with session_id when done testing."
             )
         })
 
     except Exception as e:
         print(f"Error in initiate_human_in_the_loop: {str(e)}")
-        if hitl_crawler and hasattr(hitl_crawler, '_browser_context') and hitl_crawler._browser_context:
+        # if hitl_crawler and hasattr(hitl_crawler, '_browser_context') and hitl_crawler._browser_context: # Will be False now
+        #     try:
+        #         await hitl_crawler.__aexit__(None, None, None)
+        #         print("HITL crawler exited during initiation failure cleanup.")
+        #     except Exception as crawler_cleanup_exc:
+        #         print(f"Error cleaning up HITL crawler during initiation failure: {crawler_cleanup_exc}")
+
+        if x_app_process and x_app_process.poll() is None:
             try:
-                await hitl_crawler.__aexit__(None, None, None)
-                print("HITL crawler exited during initiation failure cleanup.")
-            except Exception as crawler_cleanup_exc:
-                print(f"Error cleaning up HITL crawler during initiation failure: {crawler_cleanup_exc}")
+                x_app_process.terminate()
+                x_app_process.wait(timeout=1)
+                print("xeyes process terminated during initiation failure cleanup.")
+            except subprocess.TimeoutExpired:
+                x_app_process.kill()
+                print("xeyes process killed during initiation failure cleanup.")
+            except Exception as xapp_clean_exc:
+                print(f"Error cleaning up x_app_process during initiation failure: {xapp_clean_exc}")
 
         if fluxbox_process and fluxbox_process.poll() is None:
             try:
                 fluxbox_process.terminate()
-                fluxbox_process.wait(timeout=1) # Short wait
+                fluxbox_process.wait(timeout=1)
                 print("Fluxbox process terminated during initiation failure cleanup.")
             except subprocess.TimeoutExpired:
                 fluxbox_process.kill()
