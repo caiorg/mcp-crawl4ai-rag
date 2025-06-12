@@ -1133,15 +1133,13 @@ async def initiate_human_in_the_loop(ctx: Context, url: str) -> str:
 
         # Browser runs inside the virtual display, not headless in the traditional sense
         browser_config = BrowserConfig(
+            browser_type="firefox",  # Added to specify Firefox
             headless=False,
-            extra_args=[
-                "--no-sandbox",
-                "--disable-gpu",
-                "--disable-3d-apis",
-                "--no-gpu-sandbox", # Added this flag
-                f"--window-size=1280,1024" # Match virtual display size
-            ],
+            extra_args=None,       # Set to None (or []) for Firefox initial test
             verbose=True
+            # viewport_width and viewport_height can be used if window size needs specific setting
+            # viewport_width=1280,
+            # viewport_height=1024
         )
 
         hitl_crawler = AsyncWebCrawler(config=browser_config)
