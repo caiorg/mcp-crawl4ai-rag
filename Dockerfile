@@ -74,6 +74,9 @@ COPY . .
 RUN uv pip install --system -e . pyvirtualdisplay && \
     crawl4ai-setup
 
+# Download Firefox browser binaries for Playwright
+RUN playwright install firefox
+
 # Copy entrypoint script and make it executable
 COPY entrypoint.sh /app/entrypoint.sh
 RUN chmod +x /app/entrypoint.sh
