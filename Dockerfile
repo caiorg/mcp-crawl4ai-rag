@@ -59,6 +59,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     xdg-utils \
     libpciaccess0 \
     libegl1 \
+    pciutils \
     && rm -rf /var/lib/apt/lists/*
 
 # Clone noVNC

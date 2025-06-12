@@ -1135,7 +1135,7 @@ async def initiate_human_in_the_loop(ctx: Context, url: str) -> str:
         browser_config = BrowserConfig(
             browser_type="firefox",  # Added to specify Firefox
             headless=False,
-            extra_args=None,       # Set to None (or []) for Firefox initial test
+            extra_args=[],       # Changed to an empty list
             verbose=True
             # viewport_width and viewport_height can be used if window size needs specific setting
             # viewport_width=1280,
