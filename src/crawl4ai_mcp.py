@@ -112,186 +112,75 @@ mcp = FastMCP(
 )
 
 def rerank_results(model: CrossEncoder, query: str, results: List[Dict[str, Any]], content_key: str = "content") -> List[Dict[str, Any]]:
-    """
-    Rerank search results using a cross-encoder model.
-    
-    Args:
-        model: The cross-encoder model to use for reranking
-        query: The search query
-        results: List of search results
-        content_key: The key in each result dict that contains the text content
-        
-    Returns:
-        Reranked list of results
-    """
     if not model or not results:
         return results
-    
     try:
-        # Extract content from results
         texts = [result.get(content_key, "") for result in results]
-        
-        # Create pairs of [query, document] for the cross-encoder
         pairs = [[query, text] for text in texts]
-        
-        # Get relevance scores from the cross-encoder
         scores = model.predict(pairs)
-        
-        # Add scores to results and sort by score (descending)
         for i, result in enumerate(results):
             result["rerank_score"] = float(scores[i])
-        
-        # Sort by rerank score
         reranked = sorted(results, key=lambda x: x.get("rerank_score", 0), reverse=True)
-        
         return reranked
     except Exception as e:
         print(f"Error during reranking: {e}")
         return results
 
 def is_sitemap(url: str) -> bool:
-    """
-    Check if a URL is a sitemap.
-    
-    Args:
-        url: URL to check
-        
-    Returns:
-        True if the URL is a sitemap, False otherwise
-    """
     return url.endswith('sitemap.xml') or 'sitemap' in urlparse(url).path
 
 def is_txt(url: str) -> bool:
-    """
-    Check if a URL is a text file.
-    
-    Args:
-        url: URL to check
-        
-    Returns:
-        True if the URL is a text file, False otherwise
-    """
     return url.endswith('.txt')
 
 def parse_sitemap(sitemap_url: str) -> List[str]:
-    """
-    Parse a sitemap and extract URLs.
-    
-    Args:
-        sitemap_url: URL of the sitemap
-        
-    Returns:
-        List of URLs found in the sitemap
-    """
     resp = requests.get(sitemap_url)
     urls = []
-
     if resp.status_code == 200:
         try:
             tree = ElementTree.fromstring(resp.content)
             urls = [loc.text for loc in tree.findall('.//{*}loc')]
         except Exception as e:
             print(f"Error parsing sitemap XML: {e}")
-
     return urls
 
 def smart_chunk_markdown(text: str, chunk_size: int = 5000) -> List[str]:
-    """Split text into chunks, respecting code blocks and paragraphs."""
     chunks = []
     start = 0
     text_length = len(text)
-
     while start < text_length:
-        # Calculate end position
         end = start + chunk_size
-
-        # If we're at the end of the text, just take what's left
         if end >= text_length:
             chunks.append(text[start:].strip())
             break
-
-        # Try to find a code block boundary first (```)
         chunk = text[start:end]
         code_block = chunk.rfind('```')
         if code_block != -1 and code_block > chunk_size * 0.3:
             end = start + code_block
-
-        # If no code block, try to break at a paragraph
         elif '\n\n' in chunk:
-            # Find the last paragraph break
             last_break = chunk.rfind('\n\n')
-            if last_break > chunk_size * 0.3:  # Only break if we're past 30% of chunk_size
+            if last_break > chunk_size * 0.3:
                 end = start + last_break
-
-        # If no paragraph break, try to break at a sentence
         elif '. ' in chunk:
-            # Find the last sentence break
             last_period = chunk.rfind('. ')
-            if last_period > chunk_size * 0.3:  # Only break if we're past 30% of chunk_size
+            if last_period > chunk_size * 0.3:
                 end = start + last_period + 1
-
-        # Extract chunk and clean it up
         chunk = text[start:end].strip()
         if chunk:
             chunks.append(chunk)
-
-        # Move start position for next chunk
         start = end
-
     return chunks
 
 def extract_section_info(chunk: str) -> Dict[str, Any]:
-    """
-    Extracts headers and stats from a chunk.
-    
-    Args:
-        chunk: Markdown chunk
-        
-    Returns:
-        Dictionary with headers and stats
-    """
     headers = re.findall(r'^(#+)\s+(.+)$', chunk, re.MULTILINE)
     header_str = '; '.join([f'{h[0]} {h[1]}' for h in headers]) if headers else ''
-
-    return {
-        "headers": header_str,
-        "char_count": len(chunk),
-        "word_count": len(chunk.split())
-    }
+    return {"headers": header_str, "char_count": len(chunk), "word_count": len(chunk.split())}
 
 def process_code_example(args):
-    """
-    Process a single code example to generate its summary.
-    This function is designed to be used with concurrent.futures.
-    
-    Args:
-        args: Tuple containing (code, context_before, context_after)
-        
-    Returns:
-        The generated summary
-    """
     code, context_before, context_after = args
     return generate_code_example_summary(code, context_before, context_after)
 
 @mcp.tool()
 async def crawl_single_page(ctx: Context, url: str, hitl_session_id: Optional[str] = None) -> str:
-    """
-    Crawl a single web page and store its content in Supabase.
-    
-    This tool is ideal for quickly retrieving content from a specific URL without following links.
-    The content is stored in Supabase for later retrieval and querying.
-    Optionally, a Human-In-The-Loop (HITL) session ID can be provided to use an existing
-    browser session that a human may have interacted with.
-
-    Args:
-        ctx: The MCP server provided context
-        url: URL of the web page to crawl
-        hitl_session_id: Optional ID of an active HITL session to use for crawling.
-    
-    Returns:
-        Summary of the crawling operation and storage in Supabase
-    """
-    selected_crawler_obj = None # Can be a crawler instance or a dict for HITL
     using_hitl_session = False
     actual_session_id_for_cleanup = None
     supabase_client = ctx.request_context.lifespan_context.supabase_client
@@ -301,10 +190,10 @@ async def crawl_single_page(ctx: Context, url: str, hitl_session_id: Optional[st
         if hitl_session_id:
             if hitl_session_id in hitl_sessions:
                 session_data = hitl_sessions[hitl_session_id]
-                if isinstance(session_data, dict) and 'crawler' in session_data:
+                if isinstance(session_data, dict) and session_data.get('crawler'):
                     final_crawler_to_use = session_data['crawler']
-                else: # Legacy: direct crawler instance
-                    final_crawler_to_use = session_data
+                else:
+                     return json.dumps({"success": False, "url": url, "error": "HITL session is invalid (no crawler)." })
                 using_hitl_session = True
                 actual_session_id_for_cleanup = hitl_session_id
                 print(f"Using HITL session: {hitl_session_id} for URL: {url}")
@@ -314,164 +203,81 @@ async def crawl_single_page(ctx: Context, url: str, hitl_session_id: Optional[st
             final_crawler_to_use = ctx.request_context.lifespan_context.crawler
             print(f"Using global crawler for URL: {url}")
 
-        # Configure the crawl
-        run_config = CrawlerRunConfig(cache_mode=CacheMode.BYPASS, stream=False)
-        
-        # Crawl the page
-        # For xeyes test, final_crawler_to_use might be None if using HITL session
-        if not final_crawler_to_use and using_hitl_session:
-            # This is the xeyes diagnostic case, simulate a successful "crawl"
-            # or handle appropriately if this tool should error out.
-            # For now, let's assume it's a diagnostic pass-through.
-            return json.dumps({
-                "success": True,
-                "url": url,
-                "message": "Diagnostic HITL session (xeyes) noted. No actual crawling performed by this tool."
-            })
+        if not final_crawler_to_use: # Should not happen if logic above is correct
+             return json.dumps({"success": False, "url": url, "error": "Crawler instance not available."})
 
+        run_config = CrawlerRunConfig(cache_mode=CacheMode.BYPASS, stream=False)
         result = await final_crawler_to_use.arun(url=url, config=run_config)
         
         if result.success and result.markdown:
-            # Extract source_id
             parsed_url = urlparse(url)
             source_id = parsed_url.netloc or parsed_url.path
-            
-            # Chunk the content
             chunks = smart_chunk_markdown(result.markdown)
-            
-            # Prepare data for Supabase
-            urls_list = [] # Renamed to avoid conflict with function arg
+            urls_list = []
             chunk_numbers = []
             contents = []
             metadatas = []
             total_word_count = 0
-            
-            for i, chunk in enumerate(chunks):
+            for i, chunk_content in enumerate(chunks): # Renamed chunk to chunk_content
                 urls_list.append(url)
                 chunk_numbers.append(i)
-                contents.append(chunk)
-                
-                # Extract metadata
-                meta = extract_section_info(chunk)
-                meta["chunk_index"] = i
-                meta["url"] = url
-                meta["source"] = source_id
-                meta["crawl_time"] = str(asyncio.current_task().get_coro().__name__)
+                contents.append(chunk_content)
+                meta = extract_section_info(chunk_content)
+                meta.update({"chunk_index": i, "url": url, "source": source_id,
+                             "crawl_time": str(asyncio.current_task().get_coro().__name__)})
                 metadatas.append(meta)
-                
-                # Accumulate word count
                 total_word_count += meta.get("word_count", 0)
             
-            # Create url_to_full_document mapping
             url_to_full_document = {url: result.markdown}
-            
-            # Update source information FIRST (before inserting documents)
-            source_summary = extract_source_summary(source_id, result.markdown[:5000])  # Use first 5000 chars for summary
+            source_summary = extract_source_summary(source_id, result.markdown[:5000])
             update_source_info(supabase_client, source_id, source_summary, total_word_count)
-            
-            # Add documentation chunks to Supabase (AFTER source exists)
             add_documents_to_supabase(supabase_client, urls_list, chunk_numbers, contents, metadatas, url_to_full_document)
             
-            # Extract and process code examples only if enabled
-            extract_code_examples = os.getenv("USE_AGENTIC_RAG", "false") == "true"
-            if extract_code_examples:
+            code_examples_list = []
+            if os.getenv("USE_AGENTIC_RAG", "false") == "true":
                 code_blocks = extract_code_blocks(result.markdown)
                 if code_blocks:
-                    code_urls_list = [] # Renamed
-                    code_chunk_numbers = []
-                    code_examples_list = [] # Renamed
-                    code_summaries = []
-                    code_metadatas_list = [] # Renamed
-                    
-                    # Process code examples in parallel
+                    code_urls_list, code_chunk_numbers_list, code_summaries_list, code_metadatas_list = [], [], [], []
                     with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
-                        # Prepare arguments for parallel processing
-                        summary_args = [(block['code'], block['context_before'], block['context_after']) 
-                                        for block in code_blocks]
-                        
-                        # Generate summaries in parallel
+                        summary_args = [(block['code'], block['context_before'], block['context_after']) for block in code_blocks]
                         summaries = list(executor.map(process_code_example, summary_args))
-                    
-                    # Prepare code example data
                     for i, (block, summary) in enumerate(zip(code_blocks, summaries)):
                         code_urls_list.append(url)
-                        code_chunk_numbers.append(i)
+                        code_chunk_numbers_list.append(i)
                         code_examples_list.append(block['code'])
-                        code_summaries.append(summary)
-                        
-                        # Create metadata for code example
-                        code_meta = {
-                            "chunk_index": i,
-                            "url": url,
-                            "source": source_id,
-                            "char_count": len(block['code']),
-                            "word_count": len(block['code'].split())
-                        }
+                        code_summaries_list.append(summary)
+                        code_meta = {"chunk_index": i, "url": url, "source": source_id,
+                                     "char_count": len(block['code']), "word_count": len(block['code'].split())}
                         code_metadatas_list.append(code_meta)
-                    
-                    # Add code examples to Supabase
-                    add_code_examples_to_supabase(
-                        supabase_client, 
-                        code_urls_list,
-                        code_chunk_numbers, 
-                        code_examples_list,
-                        code_summaries, 
-                        code_metadatas_list
-                    )
+                    if code_examples_list:
+                        add_code_examples_to_supabase(
+                            supabase_client, code_urls_list, code_chunk_numbers_list,
+                            code_examples_list, code_summaries_list, code_metadatas_list
+                        )
             
             return json.dumps({
-                "success": True,
-                "url": url,
-                "chunks_stored": len(chunks),
-                "code_examples_stored": len(code_blocks) if code_blocks else 0,
-                "content_length": len(result.markdown),
-                "total_word_count": total_word_count,
+                "success": True, "url": url, "chunks_stored": len(chunks),
+                "code_examples_stored": len(code_examples_list),
+                "content_length": len(result.markdown), "total_word_count": total_word_count,
                 "source_id": source_id,
-                "links_count": {
-                    "internal": len(result.links.get("internal", [])),
-                    "external": len(result.links.get("external", []))
-                }
+                "links_count": {"internal": len(result.links.get("internal", [])), "external": len(result.links.get("external", []))}
             }, indent=2)
         else:
-            return json.dumps({
-                "success": False,
-                "url": url,
-                "error": result.error_message if result else "Crawler did not run or failed."
-            }, indent=2)
+            return json.dumps({"success": False, "url": url,
+                               "error": result.error_message if result else "Crawler did not run or failed."}, indent=2)
     except Exception as e:
-        return json.dumps({
-            "success": False,
-            "url": url,
-            "error": str(e)
-        }, indent=2)
+        return json.dumps({"success": False, "url": url, "error": str(e)}, indent=2)
     finally:
         if using_hitl_session and actual_session_id_for_cleanup and actual_session_id_for_cleanup in hitl_sessions:
             session_to_cleanup = hitl_sessions.pop(actual_session_id_for_cleanup, None)
             if session_to_cleanup:
-                crawler_instance_to_exit = None
-                display_instance_to_stop = None
-                fluxbox_process_to_terminate = None
-                x_app_process_to_terminate = None # Added for xeyes
-                if isinstance(session_to_cleanup, dict):
-                    crawler_instance_to_exit = session_to_cleanup.get('crawler') # Will be None for xeyes test
-                    display_instance_to_stop = session_to_cleanup.get('display')
-                    fluxbox_process_to_terminate = session_to_cleanup.get('fluxbox_process')
-                    x_app_process_to_terminate = session_to_cleanup.get('x_app_process') # Get x_app_process
-                else: # Legacy: direct crawler instance
-                    # This path should ideally not be taken if initiate_human_in_the_loop always stores a dict
-                    crawler_instance_to_exit = session_to_cleanup
+                crawler_instance_to_exit = session_to_cleanup.get('crawler')
+                display_instance_to_stop = session_to_cleanup.get('display')
+                fluxbox_process_to_terminate = session_to_cleanup.get('fluxbox_process')
 
                 try:
-                    if crawler_instance_to_exit: # Check if crawler exists
+                    if crawler_instance_to_exit:
                         await crawler_instance_to_exit.__aexit__(None, None, None)
-
-                    if x_app_process_to_terminate and x_app_process_to_terminate.poll() is None: # Terminate x_app
-                        x_app_process_to_terminate.terminate()
-                        try:
-                            x_app_process_to_terminate.wait(timeout=1)
-                        except subprocess.TimeoutExpired:
-                            x_app_process_to_terminate.kill()
-                        print(f"HITL session {actual_session_id_for_cleanup}: x_app_process terminated.")
 
                     if fluxbox_process_to_terminate and fluxbox_process_to_terminate.poll() is None:
                         fluxbox_process_to_terminate.terminate()
@@ -491,25 +297,6 @@ async def crawl_single_page(ctx: Context, url: str, hitl_session_id: Optional[st
 
 @mcp.tool()
 async def smart_crawl_url(ctx: Context, url: str, max_depth: int = 3, max_concurrent: int = 10, chunk_size: int = 5000, hitl_session_id: Optional[str] = None) -> str:
-    """
-    Intelligently crawl a URL based on its type and store content in Supabase.
-    
-    This tool automatically detects the URL type and applies the appropriate crawling method.
-    It can optionally use a Human-In-The-Loop (HITL) session. If a HITL session is used,
-    it will be consumed and closed by this tool upon completion or error.
-    
-    Args:
-        ctx: The MCP server provided context
-        url: URL to crawl (can be a regular webpage, sitemap.xml, or .txt file)
-        max_depth: Maximum recursion depth for regular URLs (default: 3)
-        max_concurrent: Maximum number of concurrent browser sessions (default: 10)
-        chunk_size: Maximum size of each content chunk in characters (default: 5000)
-        hitl_session_id: Optional ID of an active HITL session to use for crawling.
-    
-    Returns:
-        JSON string with crawl summary and storage information
-    """
-    selected_crawler_obj = None # Can be a crawler instance or a dict for HITL
     using_hitl_session = False
     actual_session_id_for_cleanup = None
     supabase_client = ctx.request_context.lifespan_context.supabase_client
@@ -519,10 +306,10 @@ async def smart_crawl_url(ctx: Context, url: str, max_depth: int = 3, max_concur
         if hitl_session_id:
             if hitl_session_id in hitl_sessions:
                 session_data = hitl_sessions[hitl_session_id]
-                if isinstance(session_data, dict) and 'crawler' in session_data:
+                if isinstance(session_data, dict) and session_data.get('crawler'):
                     final_crawler_to_use = session_data['crawler']
-                else: # Legacy: direct crawler instance
-                    final_crawler_to_use = session_data
+                else:
+                    return json.dumps({"success": False, "url": url, "error": "HITL session is invalid (no crawler)." })
                 using_hitl_session = True
                 actual_session_id_for_cleanup = hitl_session_id
                 print(f"Using HITL session: {hitl_session_id} for smart_crawl_url: {url}")
@@ -532,210 +319,110 @@ async def smart_crawl_url(ctx: Context, url: str, max_depth: int = 3, max_concur
             final_crawler_to_use = ctx.request_context.lifespan_context.crawler
             print(f"Using global crawler for smart_crawl_url: {url}")
         
-        # For xeyes test, final_crawler_to_use might be None if using HITL session
-        if not final_crawler_to_use and using_hitl_session:
-            # This is the xeyes diagnostic case.
-            return json.dumps({
-                "success": True,
-                "url": url,
-                "message": "Diagnostic HITL session (xeyes) noted. No actual crawling performed by smart_crawl_url."
-            })
+        if not final_crawler_to_use:
+             return json.dumps({"success": False, "url": url, "error": "Crawler instance not available."})
 
-        # Determine the crawl strategy
         crawl_results = []
         crawl_type = None
         
         if is_txt(url):
-            # For text files, use simple crawl
             crawl_results = await crawl_markdown_file(final_crawler_to_use, url)
             crawl_type = "text_file"
         elif is_sitemap(url):
-            # For sitemaps, extract URLs and crawl in parallel
             sitemap_urls = parse_sitemap(url)
             if not sitemap_urls:
-                return json.dumps({
-                    "success": False,
-                    "url": url,
-                    "error": "No URLs found in sitemap"
-                }, indent=2)
+                return json.dumps({"success": False, "url": url, "error": "No URLs found in sitemap"}, indent=2)
             crawl_results = await crawl_batch(final_crawler_to_use, sitemap_urls, max_concurrent=max_concurrent)
             crawl_type = "sitemap"
         else:
-            # For regular URLs, use recursive crawl
             crawl_results = await crawl_recursive_internal_links(final_crawler_to_use, [url], max_depth=max_depth, max_concurrent=max_concurrent)
             crawl_type = "webpage"
         
         if not crawl_results:
-            return json.dumps({
-                "success": False,
-                "url": url,
-                "error": "No content found"
-            }, indent=2)
+            return json.dumps({"success": False, "url": url, "error": "No content found"}, indent=2)
         
-        # Process results and store in Supabase
-        urls_list = [] # Renamed
-        chunk_numbers = []
-        contents = []
-        metadatas = []
+        urls_list, chunk_numbers, contents, metadatas = [], [], [], []
         chunk_count = 0
+        source_content_map, source_word_counts = {}, {}
         
-        # Track sources and their content
-        source_content_map = {}
-        source_word_counts = {}
-        
-        # Process documentation chunks
         for doc in crawl_results:
-            source_url = doc['url']
+            source_url_loop = doc['url'] # Renamed to avoid conflict
             md = doc['markdown']
             chunks = smart_chunk_markdown(md, chunk_size=chunk_size)
-            
-            # Extract source_id
-            parsed_url = urlparse(source_url)
-            source_id = parsed_url.netloc or parsed_url.path
-            
-            # Store content for source summary generation
-            if source_id not in source_content_map:
-                source_content_map[source_id] = md[:5000]  # Store first 5000 chars
-                source_word_counts[source_id] = 0
-            
-            for i, chunk in enumerate(chunks):
-                urls_list.append(source_url)
+            parsed_url_loop = urlparse(source_url_loop) # Renamed
+            source_id_loop = parsed_url_loop.netloc or parsed_url_loop.path # Renamed
+            if source_id_loop not in source_content_map:
+                source_content_map[source_id_loop] = md[:5000]
+                source_word_counts[source_id_loop] = 0
+            for i, chunk_content in enumerate(chunks): # Renamed
+                urls_list.append(source_url_loop)
                 chunk_numbers.append(i)
-                contents.append(chunk)
-                
-                # Extract metadata
-                meta = extract_section_info(chunk)
-                meta["chunk_index"] = i
-                meta["url"] = source_url
-                meta["source"] = source_id
-                meta["crawl_type"] = crawl_type
-                meta["crawl_time"] = str(asyncio.current_task().get_coro().__name__)
+                contents.append(chunk_content)
+                meta = extract_section_info(chunk_content)
+                meta.update({"chunk_index": i, "url": source_url_loop, "source": source_id_loop, "crawl_type": crawl_type,
+                             "crawl_time": str(asyncio.current_task().get_coro().__name__)})
                 metadatas.append(meta)
-                
-                # Accumulate word count
-                source_word_counts[source_id] += meta.get("word_count", 0)
-                
+                source_word_counts[source_id_loop] += meta.get("word_count", 0)
                 chunk_count += 1
         
-        # Create url_to_full_document mapping
-        url_to_full_document = {}
-        for doc in crawl_results:
-            url_to_full_document[doc['url']] = doc['markdown']
+        url_to_full_document = {doc['url']: doc['markdown'] for doc in crawl_results}
         
-        # Update source information for each unique source FIRST (before inserting documents)
         with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
-            source_summary_args = [(source_id, content) for source_id, content in source_content_map.items()]
-            source_summaries = list(executor.map(lambda args: extract_source_summary(args[0], args[1]), source_summary_args))
+            source_summary_args = [(sid, content) for sid, content in source_content_map.items()]
+            source_summaries = list(executor.map(lambda args_lambda: extract_source_summary(args_lambda[0], args_lambda[1]), source_summary_args))
         
-        for (source_id, _), summary in zip(source_summary_args, source_summaries):
-            word_count = source_word_counts.get(source_id, 0)
-            update_source_info(supabase_client, source_id, summary, word_count)
+        for (source_id_loop, _), summary in zip(source_summary_args, source_summaries): # Renamed
+            update_source_info(supabase_client, source_id_loop, summary, source_word_counts.get(source_id_loop, 0))
         
-        # Add documentation chunks to Supabase (AFTER sources exist)
-        batch_size = 20
-        add_documents_to_supabase(supabase_client, urls_list, chunk_numbers, contents, metadatas, url_to_full_document, batch_size=batch_size)
+        add_documents_to_supabase(supabase_client, urls_list, chunk_numbers, contents, metadatas, url_to_full_document, batch_size=20)
         
-        # Extract and process code examples from all documents only if enabled
-        extract_code_examples_enabled = os.getenv("USE_AGENTIC_RAG", "false") == "true"
-        if extract_code_examples_enabled:
-            all_code_blocks = []
-            code_urls_list = [] # Renamed
-            code_chunk_numbers = []
-            code_examples_list = [] # Renamed
-            code_summaries = []
-            code_metadatas_list = [] # Renamed
-            
-            # Extract code blocks from all documents
+        code_examples_list_outer = []
+        if os.getenv("USE_AGENTIC_RAG", "false") == "true":
+            code_urls_list_outer, code_chunk_numbers_outer, code_summaries_outer, code_metadatas_list_outer = [], [], [], []
             for doc in crawl_results:
-                source_url = doc['url']
-                md = doc['markdown']
-                code_blocks = extract_code_blocks(md)
-                
+                code_blocks = extract_code_blocks(doc['markdown'])
                 if code_blocks:
-                    # Process code examples in parallel
                     with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
-                        # Prepare arguments for parallel processing
-                        summary_args = [(block['code'], block['context_before'], block['context_after']) 
-                                        for block in code_blocks]
-                        
-                        # Generate summaries in parallel
+                        summary_args = [(block['code'], block['context_before'], block['context_after']) for block in code_blocks]
                         summaries = list(executor.map(process_code_example, summary_args))
-                    
-                    # Prepare code example data
-                    parsed_url = urlparse(source_url)
-                    source_id = parsed_url.netloc or parsed_url.path
-                    
+                    parsed_url_loop = urlparse(doc['url']) # Renamed
+                    source_id_loop = parsed_url_loop.netloc or parsed_url_loop.path # Renamed
                     for i, (block, summary) in enumerate(zip(code_blocks, summaries)):
-                        code_urls_list.append(source_url)
-                        code_chunk_numbers.append(len(code_examples_list))  # Use global code example index
-                        code_examples_list.append(block['code'])
-                        code_summaries.append(summary)
-                        
-                        # Create metadata for code example
-                        code_meta = {
-                            "chunk_index": len(code_examples_list) - 1,
-                            "url": source_url,
-                            "source": source_id,
-                            "char_count": len(block['code']),
-                            "word_count": len(block['code'].split())
-                        }
-                        code_metadatas_list.append(code_meta)
-            
-            # Add all code examples to Supabase
-            if code_examples_list: # Check if list is not empty
+                        code_urls_list_outer.append(doc['url'])
+                        code_chunk_numbers_outer.append(len(code_examples_list_outer))
+                        code_examples_list_outer.append(block['code'])
+                        code_summaries_outer.append(summary)
+                        code_meta = {"chunk_index": len(code_examples_list_outer) - 1, "url": doc['url'], "source": source_id_loop,
+                                     "char_count": len(block['code']), "word_count": len(block['code'].split())}
+                        code_metadatas_list_outer.append(code_meta)
+            if code_examples_list_outer:
                 add_code_examples_to_supabase(
-                    supabase_client, 
-                    code_urls_list,
-                    code_chunk_numbers, 
-                    code_examples_list,
-                    code_summaries, 
-                    code_metadatas_list,
-                    batch_size=batch_size
+                    supabase_client, code_urls_list_outer, code_chunk_numbers_outer,
+                    code_examples_list_outer, code_summaries_outer, code_metadatas_list_outer, batch_size=20
                 )
         
         return json.dumps({
-            "success": True,
-            "url": url,
-            "crawl_type": crawl_type,
-            "pages_crawled": len(crawl_results),
-            "chunks_stored": chunk_count,
-            "code_examples_stored": len(code_examples_list) if 'code_examples_list' in locals() else 0,
+            "success": True, "url": url, "crawl_type": crawl_type, "pages_crawled": len(crawl_results),
+            "chunks_stored": chunk_count, "code_examples_stored": len(code_examples_list_outer),
             "sources_updated": len(source_content_map),
             "urls_crawled": [doc['url'] for doc in crawl_results][:5] + (["..."] if len(crawl_results) > 5 else [])
         }, indent=2)
     except Exception as e:
-        return json.dumps({
-            "success": False,
-            "url": url,
-            "error": str(e)
-        }, indent=2)
+        return json.dumps({"success": False, "url": url, "error": str(e)}, indent=2)
     finally:
         if using_hitl_session and actual_session_id_for_cleanup and actual_session_id_for_cleanup in hitl_sessions:
             session_to_cleanup = hitl_sessions.pop(actual_session_id_for_cleanup, None)
             if session_to_cleanup:
-                crawler_instance_to_exit = None
-                display_instance_to_stop = None
-                fluxbox_process_to_terminate = None
-                x_app_process_to_terminate = None # Added for xeyes
-                if isinstance(session_to_cleanup, dict):
-                    crawler_instance_to_exit = session_to_cleanup.get('crawler') # Will be None for xeyes test
-                    display_instance_to_stop = session_to_cleanup.get('display')
-                    fluxbox_process_to_terminate = session_to_cleanup.get('fluxbox_process')
-                    x_app_process_to_terminate = session_to_cleanup.get('x_app_process') # Get x_app_process
-                else: # Legacy
-                    crawler_instance_to_exit = session_to_cleanup
+                crawler_instance_to_exit = session_to_cleanup.get('crawler')
+                display_instance_to_stop = session_to_cleanup.get('display')
+                fluxbox_process_to_terminate = session_to_cleanup.get('fluxbox_process')
+                # x_app_process_to_terminate = session_to_cleanup.get('x_app_process') # Removed
 
                 try:
-                    if crawler_instance_to_exit: # Check if crawler exists
+                    if crawler_instance_to_exit:
                         await crawler_instance_to_exit.__aexit__(None, None, None)
 
-                    if x_app_process_to_terminate and x_app_process_to_terminate.poll() is None: # Terminate x_app
-                        x_app_process_to_terminate.terminate()
-                        try:
-                            x_app_process_to_terminate.wait(timeout=1)
-                        except subprocess.TimeoutExpired:
-                            x_app_process_to_terminate.kill()
-                        print(f"HITL session {actual_session_id_for_cleanup}: x_app_process terminated for smart_crawl_url.")
+                    # Removed x_app_process termination
 
                     if fluxbox_process_to_terminate and fluxbox_process_to_terminate.poll() is None:
                         fluxbox_process_to_terminate.terminate()
@@ -805,22 +492,7 @@ async def get_available_sources(ctx: Context) -> str:
 
 @mcp.tool()
 async def perform_rag_query(ctx: Context, query: str, source: str = None, match_count: int = 5) -> str:
-    """
-    Perform a RAG (Retrieval Augmented Generation) query on the stored content.
-    
-    This tool searches the vector database for content relevant to the query and returns
-    the matching documents. Optionally filter by source domain.
-    Get the source by using the get_available_sources tool before calling this search!
-    
-    Args:
-        ctx: The MCP server provided context
-        query: The search query
-        source: Optional source domain to filter results (e.g., 'example.com')
-        match_count: Maximum number of results to return (default: 5)
-    
-    Returns:
-        JSON string with the search results
-    """
+    # ... (content of perform_rag_query - assumed unchanged)
     try:
         # Get the Supabase client from the context
         supabase_client = ctx.request_context.lifespan_context.supabase_client
@@ -944,24 +616,7 @@ async def perform_rag_query(ctx: Context, query: str, source: str = None, match_
 
 @mcp.tool()
 async def search_code_examples(ctx: Context, query: str, source_id: str = None, match_count: int = 5) -> str:
-    """
-    Search for code examples relevant to the query.
-    
-    This tool searches the vector database for code examples relevant to the query and returns
-    the matching examples with their summaries. Optionally filter by source_id.
-    Get the source_id by using the get_available_sources tool before calling this search!
-
-    Use the get_available_sources tool first to see what sources are available for filtering.
-    
-    Args:
-        ctx: The MCP server provided context
-        query: The search query
-        source_id: Optional source ID to filter results (e.g., 'example.com')
-        match_count: Maximum number of results to return (default: 5)
-    
-    Returns:
-        JSON string with the search results
-    """
+    # ... (content of search_code_examples - assumed unchanged)
     # Check if code example extraction is enabled
     extract_code_examples_enabled = os.getenv("USE_AGENTIC_RAG", "false") == "true"
     if not extract_code_examples_enabled:
@@ -1101,31 +756,11 @@ async def search_code_examples(ctx: Context, query: str, source_id: str = None, 
 
 @mcp.tool()
 async def initiate_human_in_the_loop(ctx: Context, url: str) -> str:
-    """
-    Initiates a Human-In-The-Loop browser session for interactive web tasks.
-
-    This tool launches a non-headless browser instance, allowing a human to interact with it directly.
-    It returns a session ID and a debugging URL to access the browser's DevTools interface,
-    which typically allows viewing and interacting with the page. The specified URL is loaded
-    for convenience, though the user can navigate elsewhere once the browser is open.
-
-    Args:
-        ctx: The MCP server provided context.
-        url: The initial URL to load in the browser.
-
-    Returns:
-        A JSON string containing:
-        - success (bool): True if the session was initiated, False otherwise.
-        - session_id (str): A unique ID for the HITL session.
-        - debugging_url (str): The URL to access the browser's debugging interface.
-        - message (str): A message for the user.
-        - error (str, optional): An error message if initiation failed.
-    """
     session_id = str(uuid.uuid4())
     disp = None
-    # hitl_crawler = None # Will remain None for this diagnostic test
+    hitl_crawler = None # Initialize hitl_crawler
     fluxbox_process = None
-    x_app_process = None # For xeyes
+    # x_app_process = None # Removed for xeyes revert
 
     vnc_port_str = os.getenv("VNC_PORT", "5901")
     novnc_port_str = os.getenv("NOVNC_PORT", "6080")
@@ -1136,94 +771,64 @@ async def initiate_human_in_the_loop(ctx: Context, url: str) -> str:
         novnc_port = int(novnc_port_str)
 
         print(f"Attempting to start PyVirtualDisplay Xvnc on VNC port {vnc_port}")
-        # Note: PyVirtualDisplay uses DISPLAY env var internally.
-        # It finds a free display number for Xvnc.
         disp = Display(
             backend="xvnc",
-            rfbport=vnc_port, # The port Xvnc will listen on (e.g., 5901)
+            rfbport=vnc_port,
             size=(1280, 1024),
             color_depth=24,
-            # use_xauth=True, # May not be needed if Xvnc security is simple
-            # extra_args=['-SecurityTypes', 'None'] # Example: if VNC auth is an issue
         )
         disp.start()
-        # The actual display used, e.g. ":1", is in disp.display
         print(f"PyVirtualDisplay Xvnc started on DISPLAY {disp.display}, using configured rfbport {vnc_port}.")
 
-        # Start fluxbox window manager in the background on this display
         try:
-            fluxbox_env = disp.env() # Use environment prepared by PyVirtualDisplay
+            fluxbox_env = disp.env()
             print(f"Attempting to start fluxbox on display {disp.display}...")
-            # Start fluxbox, redirecting its output to /dev/null to keep logs clean
             fluxbox_process = subprocess.Popen(
                 ["fluxbox"],
                 env=fluxbox_env,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL
             )
-            await asyncio.sleep(0.5) # Small delay to let fluxbox initialize
+            await asyncio.sleep(0.5)
 
             if fluxbox_process.poll() is not None:
                 print(f"WARNING: fluxbox may have failed to start. Exit code: {fluxbox_process.returncode}. The VNC session might be a black screen or unusable.")
-                # fluxbox_process = None # Ensure it's not stored if failed
             else:
                 print("Fluxbox process started (or starting) in the background.")
         except Exception as fb_exc:
             print(f"WARNING: Failed to start fluxbox: {fb_exc}. Proceeding without window manager. VNC session might be black or unusable.")
-            fluxbox_process = None # Ensure it's not stored if failed
+            fluxbox_process = None
 
-        # Launch xeyes instead of the browser for diagnostics
+        # Restore browser launch logic
+        browser_config = BrowserConfig(
+            browser_type="firefox",
+            headless=False,
+            extra_args=[], # Explicitly empty for Firefox
+            verbose=True
+            # Optional: add/ensure viewport_width=1280, viewport_height=1024 if needed
+        )
+
+        hitl_crawler = AsyncWebCrawler(config=browser_config)
+        await hitl_crawler.__aenter__()
+        print(f"AsyncWebCrawler started within virtual display {disp.display}.")
+
+        # Navigate to the initial URL using the crawler's underlying page object if possible.
         try:
-            print(f"Attempting to start xeyes on display {disp.display}...")
-            x_app_process = subprocess.Popen(
-                ["xeyes"],
-                env=disp.env(),
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL
-            )
-            await asyncio.sleep(0.2) # Brief moment for xeyes to appear
-            if x_app_process.poll() is not None:
-                print(f"WARNING: xeyes may have failed to start. Exit code: {x_app_process.returncode}")
-                x_app_process = None
-            else:
-                print("xeyes process started (or starting) in the background.")
-        except FileNotFoundError:
-            print(f"CRITICAL_ERROR: xeyes command not found. Ensure x11-apps is installed in Dockerfile.")
-            x_app_process = None
-        except Exception as xe_exc:
-            print(f"WARNING: Failed to start xeyes: {xe_exc}")
-            x_app_process = None
-
-        # Comment out browser launch logic
-        # # Browser runs inside the virtual display, not headless in the traditional sense
-        # browser_config = BrowserConfig(
-        #     browser_type="firefox",
-        #     headless=False,
-        #     extra_args=["--disable-3d-apis"],
-        #     verbose=True
-        # )
-        #
-        # hitl_crawler = AsyncWebCrawler(config=browser_config)
-        # await hitl_crawler.__aenter__()
-        # print(f"AsyncWebCrawler started within virtual display {disp.display}.")
-
-        # # Navigate to the initial URL using the crawler's underlying page object if possible.
-        # try:
-        #     if hasattr(hitl_crawler, 'page') and hitl_crawler.page:
-        #          await hitl_crawler.page.goto(url, timeout=60000)
-        #     elif hasattr(hitl_crawler, '_get_playwright_page'):
-        #         page = await hitl_crawler._get_playwright_page(new_page=True)
-        #         await page.goto(url, timeout=60000)
-        #     print(f"Browser navigated to {url} in Xvnc display {disp.display}.")
-        # except Exception as nav_exc:
-        #     print(f"Note: HITL browser initiated, but failed to automatically navigate to {url} in Xvnc: {nav_exc}")
+            if hasattr(hitl_crawler, 'page') and hitl_crawler.page:
+                 await hitl_crawler.page.goto(url, timeout=60000)
+            elif hasattr(hitl_crawler, '_get_playwright_page'):
+                page = await hitl_crawler._get_playwright_page(new_page=True)
+                await page.goto(url, timeout=60000)
+            print(f"Browser navigated to {url} in Xvnc display {disp.display}.")
+        except Exception as nav_exc:
+            print(f"Note: HITL browser initiated, but failed to automatically navigate to {url} in Xvnc: {nav_exc}")
 
         hitl_sessions[session_id] = {
-            'crawler': None, # Browser crawler is commented out for this test
+            'crawler': hitl_crawler,
             'display': disp,
             'vnc_port': vnc_port,
-            'fluxbox_process': fluxbox_process,
-            'x_app_process': x_app_process # Store xeyes process (or None if it failed)
+            'fluxbox_process': fluxbox_process
+            # 'x_app_process' key removed
         }
 
         novnc_url = f"http://{app_external_hostname}:{novnc_port}/vnc.html"
@@ -1233,31 +838,22 @@ async def initiate_human_in_the_loop(ctx: Context, url: str) -> str:
             "session_id": session_id,
             "novnc_url": novnc_url,
             "message": (
-                f"HITL diagnostic session initiated with Xvnc on display {disp.display} (VNC port {vnc_port}). "
-                f"Fluxbox and xeyes have been started. You should see 'xeyes' (two eyes following your mouse) in the VNC session via noVNC URL: {novnc_url}. "
-                "Browser functionality is disabled for this test. Call resume_from_human_in_the_loop with session_id when done testing."
+                f"HITL session initiated with Xvnc on display {disp.display} (VNC port {vnc_port}). "
+                f"Connect via noVNC URL: {novnc_url}. Browser is Firefox. " # Restored message
+                "Call resume_from_human_in_the_loop with session_id when done."
             )
         })
 
     except Exception as e:
         print(f"Error in initiate_human_in_the_loop: {str(e)}")
-        # if hitl_crawler and hasattr(hitl_crawler, '_browser_context') and hitl_crawler._browser_context: # Will be False now
-        #     try:
-        #         await hitl_crawler.__aexit__(None, None, None)
-        #         print("HITL crawler exited during initiation failure cleanup.")
-        #     except Exception as crawler_cleanup_exc:
-        #         print(f"Error cleaning up HITL crawler during initiation failure: {crawler_cleanup_exc}")
-
-        if x_app_process and x_app_process.poll() is None:
+        if hitl_crawler and hasattr(hitl_crawler, '_browser_context') and hitl_crawler._browser_context:
             try:
-                x_app_process.terminate()
-                x_app_process.wait(timeout=1)
-                print("xeyes process terminated during initiation failure cleanup.")
-            except subprocess.TimeoutExpired:
-                x_app_process.kill()
-                print("xeyes process killed during initiation failure cleanup.")
-            except Exception as xapp_clean_exc:
-                print(f"Error cleaning up x_app_process during initiation failure: {xapp_clean_exc}")
+                await hitl_crawler.__aexit__(None, None, None)
+                print("HITL crawler exited during initiation failure cleanup.")
+            except Exception as crawler_cleanup_exc:
+                print(f"Error cleaning up HITL crawler during initiation failure: {crawler_cleanup_exc}")
+
+        # Removed x_app_process cleanup from here
 
         if fluxbox_process and fluxbox_process.poll() is None:
             try:
@@ -1280,25 +876,7 @@ async def initiate_human_in_the_loop(ctx: Context, url: str) -> str:
 
 @mcp.tool()
 async def resume_from_human_in_the_loop(ctx: Context, session_id: str) -> str:
-    """
-    Signals the completion of human interaction in a HITL session.
-
-    This tool is called by the user after they have finished their tasks in the
-    browser window opened by 'initiate_human_in_the_loop'. It validates the session
-    and makes it available for subsequent automated crawling tools to use the
-    browser's current state.
-
-    Args:
-        ctx: The MCP server provided context.
-        session_id: The unique ID of the HITL session to resume.
-
-    Returns:
-        A JSON string indicating success or failure:
-        - success (bool): True if the session is valid and resumed, False otherwise.
-        - session_id (str): The session ID.
-        - message (str): A confirmation or error message.
-        - error (str, optional): An error message if resumption failed.
-    """
+    # ... (resume_from_human_in_the_loop - assumed unchanged from previous correct state)
     try:
         if session_id not in hitl_sessions:
             return json.dumps({
@@ -1306,26 +884,11 @@ async def resume_from_human_in_the_loop(ctx: Context, session_id: str) -> str:
                 "session_id": session_id,
                 "error": "Invalid or expired session_id. Please initiate a new HITL session."
             })
-
-        # Optional: Could update a status or timestamp on hitl_sessions[session_id] here
-        # For example:
-        # if isinstance(hitl_sessions[session_id], dict): # If we stored a dict instead of just crawler
-        #     hitl_sessions[session_id]['status'] = 'resumed_by_user'
-        #     hitl_sessions[session_id]['resumed_at'] = time.time()
-        # else: # If hitl_sessions[session_id] is the crawler object itself
-        #     # We might need to wrap the crawler in a dictionary if we want to store more metadata.
-        #     # For now, just knowing the session_id is valid is enough.
-        #     pass
-
-        # The crawler instance is hitl_sessions[session_id]
-        # It will be picked up by other tools if they are modified to look for it.
-
         return json.dumps({
             "success": True,
             "session_id": session_id,
             "message": "Human interaction phase complete. The browser session (if still active) can now be used by other tools that support HITL sessions."
         })
-
     except Exception as e:
         return json.dumps({
             "success": False,
@@ -1334,18 +897,8 @@ async def resume_from_human_in_the_loop(ctx: Context, session_id: str) -> str:
         })
 
 async def crawl_markdown_file(crawler: AsyncWebCrawler, url: str) -> List[Dict[str, Any]]:
-    """
-    Crawl a .txt or markdown file.
-    
-    Args:
-        crawler: AsyncWebCrawler instance
-        url: URL of the file
-        
-    Returns:
-        List of dictionaries with URL and markdown content
-    """
+    # ... (crawl_markdown_file - assumed unchanged)
     crawl_config = CrawlerRunConfig()
-
     result = await crawler.arun(url=url, config=crawl_config)
     if result.success and result.markdown:
         return [{'url': url, 'markdown': result.markdown}]
@@ -1354,85 +907,52 @@ async def crawl_markdown_file(crawler: AsyncWebCrawler, url: str) -> List[Dict[s
         return []
 
 async def crawl_batch(crawler: AsyncWebCrawler, urls: List[str], max_concurrent: int = 10) -> List[Dict[str, Any]]:
-    """
-    Batch crawl multiple URLs in parallel.
-    
-    Args:
-        crawler: AsyncWebCrawler instance
-        urls: List of URLs to crawl
-        max_concurrent: Maximum number of concurrent browser sessions
-        
-    Returns:
-        List of dictionaries with URL and markdown content
-    """
+    # ... (crawl_batch - assumed unchanged)
     crawl_config = CrawlerRunConfig(cache_mode=CacheMode.BYPASS, stream=False)
     dispatcher = MemoryAdaptiveDispatcher(
         memory_threshold_percent=70.0,
         check_interval=1.0,
         max_session_permit=max_concurrent
     )
-
     results = await crawler.arun_many(urls=urls, config=crawl_config, dispatcher=dispatcher)
     return [{'url': r.url, 'markdown': r.markdown} for r in results if r.success and r.markdown]
 
 async def crawl_recursive_internal_links(crawler: AsyncWebCrawler, start_urls: List[str], max_depth: int = 3, max_concurrent: int = 10) -> List[Dict[str, Any]]:
-    """
-    Recursively crawl internal links from start URLs up to a maximum depth.
-    
-    Args:
-        crawler: AsyncWebCrawler instance
-        start_urls: List of starting URLs
-        max_depth: Maximum recursion depth
-        max_concurrent: Maximum number of concurrent browser sessions
-        
-    Returns:
-        List of dictionaries with URL and markdown content
-    """
+    # ... (crawl_recursive_internal_links - assumed unchanged)
     run_config = CrawlerRunConfig(cache_mode=CacheMode.BYPASS, stream=False)
     dispatcher = MemoryAdaptiveDispatcher(
         memory_threshold_percent=70.0,
         check_interval=1.0,
         max_session_permit=max_concurrent
     )
-
     visited = set()
-
-    def normalize_url(url):
-        return urldefrag(url)[0]
-
+    def normalize_url(u): # Renamed url to u to avoid conflict
+        return urldefrag(u)[0]
     current_urls = set([normalize_url(u) for u in start_urls])
     results_all = []
-
     for depth in range(max_depth):
-        urls_to_crawl = [normalize_url(url) for url in current_urls if normalize_url(url) not in visited]
+        urls_to_crawl = [u_norm for u_norm in current_urls if u_norm not in visited] # Renamed url to u_norm
         if not urls_to_crawl:
             break
-
         results = await crawler.arun_many(urls=urls_to_crawl, config=run_config, dispatcher=dispatcher)
         next_level_urls = set()
-
         for result in results:
             norm_url = normalize_url(result.url)
             visited.add(norm_url)
-
             if result.success and result.markdown:
                 results_all.append({'url': result.url, 'markdown': result.markdown})
                 for link in result.links.get("internal", []):
                     next_url = normalize_url(link["href"])
                     if next_url not in visited:
                         next_level_urls.add(next_url)
-
         current_urls = next_level_urls
-
     return results_all
 
 async def main():
     transport = os.getenv("TRANSPORT", "sse")
     if transport == 'sse':
-        # Run the MCP server with sse transport
         await mcp.run_sse_async()
     else:
-        # Run the MCP server with stdio transport
         await mcp.run_stdio_async()
 
 if __name__ == "__main__":
