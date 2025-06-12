@@ -57,6 +57,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     fonts-liberation \
     lsb-release \
     xdg-utils \
+    libpciaccess0 \
+    libegl1 \
     && rm -rf /var/lib/apt/lists/*
 
 # Clone noVNC
