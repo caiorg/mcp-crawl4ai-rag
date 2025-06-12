@@ -1137,7 +1137,8 @@ async def initiate_human_in_the_loop(ctx: Context, url: str) -> str:
             extra_args=[
                 "--no-sandbox",
                 "--disable-gpu",
-                "--disable-3d-apis", # Added this flag
+                "--disable-3d-apis",
+                "--no-gpu-sandbox", # Added this flag
                 f"--window-size=1280,1024" # Match virtual display size
             ],
             verbose=True
